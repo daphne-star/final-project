@@ -1,6 +1,14 @@
-# Secrets
+# Secrets. No slash in these patterns, so they apply at every depth -- a .env
+# left in backend/ or frontend/ is covered too, not just this folder.
+#
+# .env.* matters on its own: without it a file like .env.production is
+# committable, and in this checkout that gap was being covered by a
+# .gitignore one level up, which a standalone clone of this repo does not
+# have. The templates stay committable; they carry names, never values.
 .env
-.env.local
+.env.*
+!.env.example
+!.env.*.example
 
 # Python
 .venv/
