@@ -6,16 +6,34 @@ from pathlib import Path
 from pydantic import Field, PostgresDsn, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# The repo keeps a single .env at the course-root level (one above final-project),
-# so resolve upward from this file rather than assuming the process CWD.
+# Resolve upward from this file rather than trusting the process CWD, which
+# differs between `uvicorn` from backend/, pytest from the repo root, and a
+# demo script run from anywhere.
 BACKEND_DIR = Path(__file__).resolve().parents[2]
-PROJECT_DIR = BACKEND_DIR.parent
-REPO_ROOT = PROJECT_DIR.parent
+#: The repository's own folder: the one holding backend/ and frontend/.
+REPO_DIR = BACKEND_DIR.parent
+#: Whatever the repository was cloned into. A key kept here is shared by
+#: everything in that folder, which is how this checkout is actually set up.
+PARENT_DIR = REPO_DIR.parent
+
+
+def env_files(repo_dir: Path = REPO_DIR) -> tuple[Path, ...]:
+    """The .env files to read, **lowest precedence first**.
+
+    Two locations: the repository's own folder, and the folder above it. A
+    .env beside the project wins, so a per-project key overrides a shared one
+    without anyone having to move files around.
+
+    The order looks backwards because pydantic-settings applies a sequence in
+    order and lets *later* files override earlier ones. Reversing this tuple
+    silently inverts the precedence, which is why test_config.py pins it.
+    """
+    return (repo_dir.parent / ".env", repo_dir / ".env")
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=(REPO_ROOT / ".env", PROJECT_DIR / ".env", BACKEND_DIR / ".env"),
+        env_file=env_files(),
         env_file_encoding="utf-8",
         extra="ignore",
     )

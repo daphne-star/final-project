@@ -62,9 +62,20 @@ then `initdb -D <datadir> -U postgres` and `createdb ghostboard`.
 cp .env.example .env
 ```
 
-Set `SECRET_KEY`. `PORTKEY_API_KEY` is already in the repo-root `.env` and is
-picked up automatically — the backend searches the repo root, `final-project/`,
-and `backend/` in that order.
+Set `SECRET_KEY` and `PORTKEY_API_KEY`.
+
+The backend looks for a `.env` in **two** places, resolved from the source
+file rather than the working directory, so it does not matter where you
+launch it from:
+
+| Location | When to use it |
+| --- | --- |
+| this repo's own folder | a key just for this project |
+| the folder above it | one key shared by several checkouts |
+
+If both exist, this repo's own `.env` wins. A real environment variable beats
+both, which is how a container or CI secret works with no file at all. The
+rule is pinned by `backend/tests/test_config.py`.
 
 ### 3. Backend
 
