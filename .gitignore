@@ -1,0 +1,26 @@
+# Secrets
+.env
+.env.local
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# Node
+node_modules/
+dist/
+*.local
+
+# Uploads
+backend/var/
+backend/uploads/
+
+# Editors / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

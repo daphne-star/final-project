@@ -1,0 +1,121 @@
+@import 'tailwindcss';
+
+/* Ghost Board design system.
+   Premium dark boardroom: midnight navy canvas, warm off-white ink, a single
+   soft violet accent. Executive cards bring their own accent colors; the
+   application chrome stays neutral so nine palettes can coexist without noise. */
+
+@theme {
+  --color-canvas: #0b0e16;
+  --color-canvas-deep: #070a11;
+  --color-surface: #141926;
+  --color-surface-raised: #1b2130;
+  --color-surface-hover: #212838;
+
+  --color-ink: #f2efe9;
+  --color-ink-muted: #8c93a3;
+  --color-ink-faint: #5d6474;
+
+  --color-accent: #7c5cd6;
+  --color-accent-soft: #a98df0;
+  --color-accent-dim: #3a2d63;
+
+  --color-line: #262d3d;
+  --color-line-strong: #333c50;
+
+  --color-positive: #3f9e7c;
+  --color-caution: #c9a227;
+  --color-critical: #c75c5c;
+
+  --font-display: 'Georgia', 'Iowan Old Style', serif;
+  --font-sans: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+
+  --radius-card: 0.75rem;
+
+  --animate-rise: rise 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+  --animate-pulse-soft: pulse-soft 2.4s ease-in-out infinite;
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes pulse-soft {
+  0%,
+  100% {
+    opacity: 0.45;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@layer base {
+  * {
+    border-color: var(--color-line);
+  }
+
+  html {
+    color-scheme: dark;
+  }
+
+  body {
+    background-color: var(--color-canvas);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    min-height: 100dvh;
+  }
+
+  /* A faint vertical wash keeps large dark surfaces from reading as flat. */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    background: radial-gradient(
+      120% 80% at 50% -10%,
+      rgba(124, 92, 214, 0.08),
+      transparent 60%
+    );
+    z-index: 0;
+  }
+
+  ::selection {
+    background: var(--color-accent-dim);
+    color: var(--color-ink);
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-accent-soft);
+    outline-offset: 2px;
+  }
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+
+  /* Hairline border that reads as a drawn line rather than a box. */
+  .hairline {
+    box-shadow: inset 0 0 0 1px var(--color-line);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
