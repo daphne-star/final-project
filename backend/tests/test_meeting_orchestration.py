@@ -332,6 +332,84 @@ async def test_usage_is_recorded_per_agent_and_stage(db, org_and_user):
     assert meeting.model_requests_used == 10
 
 
+async def test_the_meeting_keeps_its_own_token_total(db, org_and_user):
+    """The figure the UI shows has to survive the meeting ending.
+
+    Per-call counts were already on llm_usage_records, but nothing summed
+    them onto the meeting, so reopening a finished one had only a request
+    count to show.
+    """
+    org, user = org_and_user
+    meeting, _, _, _ = await _run(db, org, user)
+
+    records = (
+        (await db.execute(select(LLMUsageRecord).where(LLMUsageRecord.meeting_id == meeting.id)))
+        .scalars()
+        .all()
+    )
+    assert meeting.input_tokens_used == sum(r.input_tokens for r in records)
+    assert meeting.output_tokens_used == sum(r.output_tokens for r in records)
+    assert meeting.total_tokens_used == meeting.input_tokens_used + meeting.output_tokens_used
+    # A real run cannot cost nothing; a zero here would mean the model is not
+    # reporting usage and the display would be quietly wrong.
+    assert meeting.total_tokens_used > 0
+
+
+async def test_a_running_meeting_reports_tokens_as_it_goes(db, org_and_user):
+    """Stage changes carry the running total, so the count is live."""
+    org, user = org_and_user
+    meeting, _, _, _ = await _run(db, org, user)
+
+    totals = [
+        e.payload.get("total_tokens")
+        for e in (
+            await db.execute(
+                select(MeetingEvent)
+                .where(
+                    MeetingEvent.meeting_id == meeting.id,
+                    MeetingEvent.event_type == EventType.STAGE_CHANGED.value,
+                )
+                .order_by(MeetingEvent.sequence_number)
+            )
+        )
+        .scalars()
+        .all()
+    ]
+
+    assert all(t is not None for t in totals), "a stage change carried no token total"
+    assert totals == sorted(totals), "the running total went backwards"
+    assert totals[-1] > 0
+    # The last stage change precedes synthesis, so it cannot already hold the
+    # final figure -- but it must not exceed it either.
+    assert totals[-1] <= meeting.total_tokens_used
+
+
+async def test_a_failed_meeting_still_reports_what_it_spent(db, org_and_user):
+    """Tokens are spent whether or not a brief comes out the other end."""
+    from pydantic_ai.models.function import FunctionModel
+
+    org, user = org_and_user
+    meeting = await _make_meeting(db, org, user)
+
+    async def always_fails(messages, info):
+        raise RuntimeError("provider exploded")
+
+    orch = MeetingOrchestrator(
+        db,
+        meeting,
+        await load_company_context(db, org.id),
+        model=FunctionModel(always_fails, model_name="failing"),
+        user_id=user.id,
+    )
+    with pytest.raises(MeetingAborted):
+        await orch.run()
+
+    assert meeting.status is MeetingStatus.FAILED
+    # Nothing succeeded, so nothing was billed -- but the columns must exist
+    # and be honest rather than absent.
+    assert meeting.total_tokens_used == 0
+
+
 # --------------------------------------------------------------------------
 # Failure handling
 # --------------------------------------------------------------------------

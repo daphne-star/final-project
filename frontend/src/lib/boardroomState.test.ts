@@ -26,6 +26,35 @@ describe('boardroom reducer', () => {
     expect(state.modelRequests).toBe(10)
   })
 
+  it('tracks the running token total across stage changes', () => {
+    let state = initialBoardroomState()
+    expect(state.totalTokens).toBeNull()
+
+    resetSeq()
+    state = reduceEvent(state, ev('stage_changed', null, { stage: 'agenda', total_tokens: 1200 }))
+    expect(state.totalTokens).toBe(1200)
+
+    state = reduceEvent(
+      state,
+      ev('stage_changed', null, { stage: 'assessments', total_tokens: 18400 }),
+    )
+    expect(state.totalTokens).toBe(18400)
+
+    state = reduceEvent(state, ev('meeting_completed', null, { total_tokens: 42310 }))
+    expect(state.totalTokens).toBe(42310)
+  })
+
+  it('leaves the token total alone when an event carries none', () => {
+    // Older events predate the field; a missing count must not read as zero.
+    resetSeq()
+    let state = reduceEvent(
+      initialBoardroomState(),
+      ev('stage_changed', null, { stage: 'agenda', total_tokens: 900 }),
+    )
+    state = reduceEvent(state, ev('stage_changed', null, { stage: 'debate' }))
+    expect(state.totalTokens).toBe(900)
+  })
+
   it('orders the transcript by sequence, not arrival', () => {
     const state = reduceEvents(fullMeetingEvents())
     const sequences = state.transcript.map((t) => t.sequence)

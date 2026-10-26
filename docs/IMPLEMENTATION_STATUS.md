@@ -1,6 +1,6 @@
 # Ghost Board — Implementation Status
 
-Last updated: 2026-10-26 (end of Session 9)
+Last updated: 2026-10-26 (Session 9, plus token-usage reporting)
 
 | Phase | Scope | Status |
 | --- | --- | --- |
@@ -624,6 +624,72 @@ box — which is the honest arrangement, not a workaround.
 
 ---
 
+## Token usage replaces the model-call count
+
+### Verified working
+
+**The meeting carries its own token totals.** Per-call counts already lived on
+`llm_usage_records`; nothing summed them onto the meeting, so reopening a
+finished one had only a request count to show. `Meeting` now has
+`input_tokens_used` and `output_tokens_used`, split because cost is priced per
+direction and because that is what the per-call rows already store. The total
+is a property rather than a third column, so it cannot drift from its parts.
+
+**Existing meetings were backfilled, not zeroed.** Migration `0006_token_usage`
+sums `llm_usage_records` per meeting rather than defaulting to `0`, which would
+have claimed every past meeting cost nothing. On this machine's six recorded
+meetings the backfill produced 47,124 to 104,348 tokens each.
+
+**The count is live, at no extra cost.** The running total rides on the
+`stage_changed` payload rather than getting an event of its own: `_emit`
+commits, so a dedicated counter event would have added roughly ten commits a
+meeting for a number that changes about six times.
+`test_a_running_meeting_reports_tokens_as_it_goes` asserts every stage change
+carries a total, that the sequence never goes backwards, and that it never
+exceeds the finalised figure.
+
+**Three displays changed.** The boardroom header shows the running total beside
+the status chip, the completed notice shows the final figure where it used to
+say "N model calls", and the meetings list shows it per row. All three read
+`state.totalTokens ?? meeting.total_tokens_used`, so a meeting whose events
+predate this change still shows the backfilled total. Counts are exact and
+grouped (`90,821 tokens`) rather than abbreviated: this is the figure checked
+against a provider bill, and `90.8k` is not that figure.
+
+**Verified in the browser** on a real completed meeting: header and completed
+notice both read `90,821 tokens`, matching `input 77,622 + output 13,199` from
+the API, and no "model calls" text remains anywhere on the page.
+
+**The pre-run estimate reads in tokens too, and is measured.** The obvious
+route — predict model calls, multiply by a tokens-per-call figure — was built
+and then checked against real runs, which killed it: the call formula
+(`2 + participants * 2`) says a Full Board makes 18 calls and the recorded one
+made 35, because it ignores debate rounds. Multiplying that by anything
+understates a Full Board roughly twofold and presents the result as a token
+count someone might check against a bill.
+
+So the estimate compares like with like: the median of what this organization's
+own past meetings *in the same mode* actually used. With no same-mode history it
+widens to every mode, scaling each past meeting by relative size — a ratio of
+two numbers from the same biased estimator, so the bias largely cancels — and
+the copy says that is what it did. With no history at all it declines to
+estimate and shows the call count instead.
+
+Against the six recorded meetings the hint now reads: Full Board 100,000
+(real: 104,348), Devil's Advocate 70,000 (real: 69,732), Executive Meeting
+55,000 (four real runs, 47,124-90,821), Quick Consultation 23,000 (scaled, no
+history). The unscaled cross-mode median had quoted that consultation at
+62,000 — a one-executive meeting priced as a nine-agent board.
+
+### Deliberately not changed
+
+**`model_requests_used` stays.** It is one of three ceilings in
+`Budget.exceeded_reason()` and the cheapest guard against a runaway loop.
+Removing the column would have removed `MAX_MODEL_REQUESTS_PER_MEETING` with
+it. It is no longer shown to anyone.
+
+---
+
 ## Reproducing the primary workflow
 
 Prerequisites: PostgreSQL running, `PORTKEY_API_KEY` in the repo-root `.env`.
@@ -720,19 +786,19 @@ cd frontend && npx tsc --noEmit && npx vitest run
 
 ---
 
-## Test and check results (end of Session 9)
+## Test and check results
 
 | Check | Result |
 | --- | --- |
-| `pytest` (backend) | **270 passed in 131s** |
-| — meeting orchestration | 38 |
+| `pytest` (backend) | **274 passed in 96s** |
+| — meeting orchestration | 41 |
 | — knowledge and ingestion | 35 |
 | — MCP tools | 34 |
 | — interventions, pause, export | 32 |
 | — meeting modes | 25 |
 | — agent factory | 22 |
 | — consultations API | 20 |
-| — meetings API | 17 |
+| — meetings API | 18 |
 | — SSE stream | 15 |
 | — registry | 11 |
 | — **authorization sweep** | **9** |
@@ -742,14 +808,15 @@ cd frontend && npx tsc --noEmit && npx vitest run
 | `alembic upgrade / downgrade / upgrade` | Clean round-trip on a fresh database |
 | `alembic check` | No drift |
 | `tsc --noEmit` (frontend) | Clean |
-| `vitest run` (frontend) | **65 passed, 6 files** |
-| — boardroom reducer | 22 |
+| `vitest run` (frontend) | **78 passed, 7 files** |
+| — boardroom reducer | 24 |
 | — SSE parser | 11 |
 | — transcript / rail rendering | 11 |
 | — executive card + portraits | 9 |
 | — **screen-reader announcer** | **6** |
+| — **meeting cost estimate** | **11** |
 | — structured panels | 6 |
-| `npm run build` | Clean, 541 kB / 167 kB gzipped |
+| `npm run build` | Clean, 543 kB / 168 kB gzipped |
 | Accessibility audit (live DOM, 6 pages + 3 tabs) | No findings remaining |
 | Live meeting from the UI | Verified: streamed, refreshed, 18 entries intact |
 | Live MCP tool call | Verified: CFO runway, COO capacity, both audited |
@@ -758,3 +825,5 @@ cd frontend && npx tsc --noEmit && npx vitest run
 | Live document-grounded meeting | Verified: board rejected a false premise from an uploaded file |
 | Live intervention | Verified: COO withdrew a claim under challenge |
 | Live PDF export | Verified: 4 pages, 34 non-ASCII characters intact |
+| Live token display | Verified: header and brief both read 90,821 on a real meeting |
+| Live cost estimate | Verified: within 5% of the real figure on both measured modes |

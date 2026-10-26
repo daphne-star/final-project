@@ -68,6 +68,11 @@ class MeetingRead(ORMModel):
     failure_reason: str | None
     debate_rounds_used: int
     model_requests_used: int
+    input_tokens_used: int
+    output_tokens_used: int
+    #: Read off the ORM property, so the API cannot report a total that
+    #: disagrees with its own parts.
+    total_tokens_used: int
     estimated_cost_usd: float
     created_at: datetime
 

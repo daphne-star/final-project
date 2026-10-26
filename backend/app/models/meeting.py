@@ -82,9 +82,20 @@ class Meeting(Base, UUIDMixin, TimestampMixin):
     failure_reason: Mapped[str | None] = mapped_column(Text)
 
     debate_rounds_used: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    #: Kept as a runaway guard, not as a figure for the user: a request count
+    #: says nothing about how much work a meeting actually did.
     model_requests_used: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     tool_calls_used: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    #: Split rather than one total, because cost is priced per direction and
+    #: the split is what LLMUsageRecord already stores per call.
+    input_tokens_used: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    output_tokens_used: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     estimated_cost_usd: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+
+    @property
+    def total_tokens_used(self) -> int:
+        """Derived, so it cannot drift from the two columns it sums."""
+        return self.input_tokens_used + self.output_tokens_used
 
     organization: Mapped[Organization] = relationship(back_populates="meetings")
     participants: Mapped[list[MeetingParticipant]] = relationship(

@@ -144,7 +144,7 @@ final-project/
 │   │   ├── services/            # consultation, meeting, knowledge, ingestion, export
 │   │   ├── models/              # 23 ORM entities
 │   │   └── schemas/             # request/response models
-│   ├── alembic/versions/        # 0001_initial .. 0005_interventions
+│   ├── alembic/versions/        # 0001_initial .. 0006_token_usage
 │   ├── scripts/                 # demo_consultation, demo_meeting, demo_mcp
 │   └── tests/
 └── frontend/
@@ -200,6 +200,24 @@ latency for durability without Redis.
 **Organization scope is server-side.** `X-Organization-Id` only selects among
 orgs the authenticated user already belongs to; it can never widen access. No
 model-supplied org id is ever trusted for authorization.
+
+**The cost estimate is measured, not derived.** The New Meeting hint could
+have predicted model calls and multiplied by a tokens-per-call figure; checked
+against real runs, that understates a Full Board roughly twofold, because the
+call formula ignores debate rounds. It instead takes the median of what this
+organization's own past meetings in the same mode actually used, widening to
+all modes — scaled by relative size — only when this mode has no history, and
+saying which it did.
+
+**Usage is measured in tokens, not calls.** A request count says how many
+times the board was asked something, not how much work it did: across real
+meetings here, calls varied threefold for the same question shape while tokens
+tracked the actual reasoning. The meeting carries `input_tokens_used` and
+`output_tokens_used`, totalled by a property so the sum cannot drift from its
+parts, and the running total rides on `stage_changed` rather than getting an
+event of its own — `_emit` commits, and a counter worth six updates does not
+justify ten more commits. `model_requests_used` stays as a runaway guard, not
+as a figure anyone is shown.
 
 **An unknown cost is not a zero.** Pydantic AI has no price table for
 `gpt-6-luna`, so every usage row used to record `0.00` and the configured cost

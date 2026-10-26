@@ -3,12 +3,17 @@ import { useNavigate } from 'react-router-dom'
 import { AlertCircle, Gavel, Loader2 } from 'lucide-react'
 
 import { useExecutives } from '@/api/agents'
-import { useCreateMeeting, useDecisions } from '@/api/meetings'
+import { useCreateMeeting, useDecisions, useMeetings } from '@/api/meetings'
 import { MEETING_MODES, ModePicker, modeOption } from '@/components/boardroom/ModePicker'
 import { EXECUTIVE_PORTRAITS } from '@/assets/executives'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { cn } from '@/lib/utils'
+import {
+  estimateMeetingTokens,
+  estimateModelCalls,
+  type PastMeetingUsage,
+} from '@/lib/meetingEstimate'
+import { cn, formatTokens } from '@/lib/utils'
 import type { ExecutiveDefinition } from '@/types/agents'
 import type { MeetingMode } from '@/types/meetings'
 
@@ -28,6 +33,8 @@ export function NewMeetingPage() {
   const create = useCreateMeeting()
 
   const { data: decisions } = useDecisions()
+  // The cost hint is learned from this organization's own finished meetings.
+  const { data: pastMeetings } = useMeetings()
 
   const [question, setQuestion] = useState('')
   const [mode, setMode] = useState<MeetingMode>('executive_meeting')
@@ -229,12 +236,64 @@ export function NewMeetingPage() {
             {create.isPending ? <Loader2 className="animate-spin" /> : <Gavel />}
             {create.isPending ? 'Convening…' : 'Convene the board'}
           </Button>
-          <p className="text-xs text-ink-faint">
-            Roughly {2 + (rosterLocked ? 8 : selected.length) * 2} model calls.
-          </p>
+          <CostHint
+            mode={mode}
+            participantCount={rosterLocked ? 8 : selected.length}
+            history={(pastMeetings ?? []).map((m) => ({
+              mode: m.mode,
+              totalTokens: m.total_tokens_used,
+            }))}
+          />
         </div>
       </form>
     </div>
+  )
+}
+
+/**
+ * What this meeting is likely to cost. Always says where the number came
+ * from, so the user can weigh it: a sample of one reads very differently
+ * from a sample of six, and a cross-mode sample differently again.
+ */
+function CostHint({
+  mode,
+  participantCount,
+  history,
+}: {
+  mode: MeetingMode
+  participantCount: number
+  history: PastMeetingUsage[]
+}) {
+  const estimate = estimateMeetingTokens(mode, history, {
+    expectedCalls: estimateModelCalls(participantCount),
+    // Both sides of the scaling use this same estimator, so its known
+    // undercount cancels out of the ratio.
+    callsForMode: (m) => {
+      const past = modeOption(m)
+      return estimateModelCalls(past.fixedRoster ? 8 : past.defaultParticipants.length)
+    },
+  })
+
+  if (!estimate) {
+    return (
+      <p className="text-xs text-ink-faint">
+        Roughly {estimateModelCalls(participantCount)} model calls. A token
+        estimate appears once you have finished a meeting to measure.
+      </p>
+    )
+  }
+
+  const meetings =
+    estimate.sampleSize === 1 ? 'one meeting' : `${estimate.sampleSize} meetings`
+
+  return (
+    <p className="text-xs text-ink-faint">
+      About {formatTokens(estimate.tokens)}, from your{' '}
+      {estimate.basis === 'same-mode'
+        ? `${meetings} in this mode`
+        : `${meetings} in other modes, scaled for this one`}
+      .
+    </p>
   )
 }
 

@@ -76,6 +76,8 @@ export interface BoardroomState {
   failureReason: string | null
   lastSequence: number
   modelRequests: number | null
+  /** Running total, updated at each stage boundary and finalised on completion. */
+  totalTokens: number | null
 }
 
 export function initialBoardroomState(): BoardroomState {
@@ -97,6 +99,7 @@ export function initialBoardroomState(): BoardroomState {
     failureReason: null,
     lastSequence: 0,
     modelRequests: null,
+    totalTokens: null,
   }
 }
 
@@ -145,6 +148,9 @@ export function reduceEvent(state: BoardroomState, event: MeetingEvent): Boardro
 
     case 'stage_changed':
       next.stage = str(p.stage) as MeetingStage
+      // The orchestrator attaches the running token total here rather than
+      // emitting a counter event of its own.
+      if (p.total_tokens != null) next.totalTokens = Number(p.total_tokens)
       break
 
     case 'agenda_created': {
@@ -365,6 +371,7 @@ export function reduceEvent(state: BoardroomState, event: MeetingEvent): Boardro
       next.status = 'completed'
       next.paused = false
       next.modelRequests = Number(p.model_requests ?? 0)
+      if (p.total_tokens != null) next.totalTokens = Number(p.total_tokens)
       for (const id of Object.keys(next.activity)) {
         if (next.activity[id] !== 'failed' && next.activity[id] !== 'skipped') {
           next.activity[id] = 'finished'

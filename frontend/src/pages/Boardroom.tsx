@@ -30,7 +30,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { useMeetingStream } from '@/hooks/useMeetingStream'
-import { cn } from '@/lib/utils'
+import { cn, formatTokens } from '@/lib/utils'
 import type { ExecutiveDefinition } from '@/types/agents'
 
 export function BoardroomPage() {
@@ -159,6 +159,7 @@ export function BoardroomPage() {
       <BoardroomHeader
         title={meeting.title}
         status={status}
+        totalTokens={state.totalTokens ?? meeting.total_tokens_used}
         stage={state.stage ?? meeting.stage}
         connection={connection}
         isRunning={isRunning}
@@ -248,7 +249,7 @@ export function BoardroomPage() {
               <CompletedNotice
                 decisionId={meeting.decision.id}
                 summary={meeting.decision.executive_summary}
-                modelRequests={state.modelRequests ?? meeting.model_requests_used}
+                totalTokens={state.totalTokens ?? meeting.total_tokens_used}
               />
             )}
 
@@ -344,6 +345,7 @@ export function BoardroomPage() {
 function BoardroomHeader({
   title,
   status,
+  totalTokens,
   stage,
   connection,
   isRunning,
@@ -358,6 +360,7 @@ function BoardroomHeader({
 }: {
   title: string
   status: string | null
+  totalTokens: number
   stage: string | null
   connection: string
   isRunning: boolean
@@ -387,6 +390,12 @@ function BoardroomHeader({
             className="mt-0.5 hidden sm:flex"
           />
         </div>
+
+        {totalTokens > 0 && (
+          <span className="hidden whitespace-nowrap text-xs text-ink-faint sm:inline">
+            {formatTokens(totalTokens)}
+          </span>
+        )}
 
         <StatusChip status={status} connection={connection} />
 
@@ -584,11 +593,11 @@ function FailureNotice({
 function CompletedNotice({
   decisionId,
   summary,
-  modelRequests,
+  totalTokens,
 }: {
   decisionId: string
   summary: string
-  modelRequests: number
+  totalTokens: number
 }) {
   return (
     <div
@@ -600,7 +609,7 @@ function CompletedNotice({
       <div className="flex items-center gap-2">
         <CheckCircle2 className="size-4 text-positive" />
         <p className="text-sm font-medium text-ink">Decision brief ready</p>
-        <span className="ml-auto text-xs text-ink-faint">{modelRequests} model calls</span>
+        <span className="ml-auto text-xs text-ink-faint">{formatTokens(totalTokens)}</span>
       </div>
       <p className="mt-2 text-sm leading-relaxed text-ink-muted">{summary}</p>
       <Button variant="outline" size="sm" className="mt-3" asChild>

@@ -511,7 +511,14 @@ class MeetingOrchestrator:
     async def _set_stage(self, stage: MeetingStage) -> None:
         self.meeting.stage = stage
         await self.db.flush()
-        await self._emit(EventType.STAGE_CHANGED, stage=stage.value)
+        # The running token total rides along on a stage change rather than
+        # getting an event of its own: _emit commits, and a counter worth
+        # roughly six updates a meeting does not justify ten more commits.
+        await self._emit(
+            EventType.STAGE_CHANGED,
+            stage=stage.value,
+            total_tokens=self.budget.input_tokens + self.budget.output_tokens,
+        )
 
     async def _set_participant_status(
         self, agent_id: AgentId, status: ParticipantStatus
@@ -1387,5 +1394,7 @@ class MeetingOrchestrator:
 
     async def _finalise(self) -> None:
         self.meeting.model_requests_used = self.budget.model_requests
+        self.meeting.input_tokens_used = self.budget.input_tokens
+        self.meeting.output_tokens_used = self.budget.output_tokens
         self.meeting.estimated_cost_usd = self.budget.estimated_cost_usd
         await self.db.flush()

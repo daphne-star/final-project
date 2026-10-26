@@ -145,6 +145,22 @@ async def test_meetings_are_listed_for_the_organization(client, db, org_and_user
     assert len(res.json()) == 2
 
 
+async def test_the_api_reports_token_usage_with_its_parts(client, db, org_and_user):
+    """The list and the detail must agree, and the total must be the sum."""
+    org, user = org_and_user
+    meeting = await _completed_meeting(db, org, user)
+
+    detail = (await client.get(f"/api/meetings/{meeting.id}")).json()
+    assert detail["total_tokens_used"] > 0
+    assert (
+        detail["total_tokens_used"]
+        == detail["input_tokens_used"] + detail["output_tokens_used"]
+    )
+
+    listed = next(m for m in (await client.get("/api/meetings")).json() if m["id"] == detail["id"])
+    assert listed["total_tokens_used"] == detail["total_tokens_used"]
+
+
 async def test_another_organization_cannot_read_the_meeting(client, db, org_and_user):
     org, user = org_and_user
     meeting = await _completed_meeting(db, org, user)

@@ -4,6 +4,7 @@ import { CheckCircle2, Gavel, Loader2, Plus, XCircle } from 'lucide-react'
 import { useMeetings } from '@/api/meetings'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { formatTokens } from '@/lib/utils'
 import type { Meeting, MeetingStatus } from '@/types/meetings'
 
 const STATUS_BADGE: Record<
@@ -81,7 +82,7 @@ function MeetingRow({ meeting }: { meeting: Meeting }) {
           <p className="truncate text-sm font-medium text-ink">{meeting.title}</p>
           <p className="mt-0.5 text-xs text-ink-faint">
             {new Date(meeting.created_at).toLocaleString()}
-            {meeting.model_requests_used > 0 && ` · ${meeting.model_requests_used} model calls`}
+            {meeting.total_tokens_used > 0 && ` · ${formatTokens(meeting.total_tokens_used)}`}
           </p>
         </div>
 
