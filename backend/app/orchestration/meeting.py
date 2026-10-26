@@ -172,6 +172,7 @@ class Budget:
     limits: MeetingLimits
     model_requests: int = 0
     input_tokens: int = 0
+    cached_input_tokens: int = 0
     output_tokens: int = 0
     estimated_cost_usd: float = 0.0
     #: False while no model in this meeting has a configured price, so a
@@ -203,6 +204,7 @@ class Budget:
     def record(self, usage: Any) -> None:
         self.model_requests += getattr(usage, "requests", 1) or 1
         self.input_tokens += getattr(usage, "input_tokens", 0) or 0
+        self.cached_input_tokens += getattr(usage, "cache_read_tokens", 0) or 0
         self.output_tokens += getattr(usage, "output_tokens", 0) or 0
 
 
@@ -616,6 +618,7 @@ class MeetingOrchestrator:
         if outcome.ok:
             self.budget.record(outcome.usage)
             inp = getattr(outcome.usage, "input_tokens", 0) or 0
+            cached = getattr(outcome.usage, "cache_read_tokens", 0) or 0
             out = getattr(outcome.usage, "output_tokens", 0) or 0
             cost = estimate_cost(outcome.model_name, inp, out)
             if cost is not None:
@@ -630,6 +633,7 @@ class MeetingOrchestrator:
                     stage=outcome.stage,
                     request_count=getattr(outcome.usage, "requests", 1) or 1,
                     input_tokens=inp,
+                    cached_input_tokens=cached,
                     output_tokens=out,
                     total_tokens=inp + out,
                     estimated_cost_usd=cost or 0.0,
@@ -1395,6 +1399,7 @@ class MeetingOrchestrator:
     async def _finalise(self) -> None:
         self.meeting.model_requests_used = self.budget.model_requests
         self.meeting.input_tokens_used = self.budget.input_tokens
+        self.meeting.cached_input_tokens_used = self.budget.cached_input_tokens
         self.meeting.output_tokens_used = self.budget.output_tokens
         self.meeting.estimated_cost_usd = self.budget.estimated_cost_usd
         await self.db.flush()

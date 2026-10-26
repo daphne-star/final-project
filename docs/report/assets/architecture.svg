@@ -1,0 +1,102 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 580" width="920" height="580" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#6b5bb5"/>
+    </marker>
+    <marker id="arrowgrey" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#8a8fa3"/>
+    </marker>
+  </defs>
+
+  <style>
+    .box { fill: #ffffff; stroke: #c9cddb; stroke-width: 1.5; rx: 8; }
+    .accent { fill: #f4f1fd; stroke: #7c5cd6; stroke-width: 1.8; }
+    .data { fill: #eef6f2; stroke: #3f9e7c; stroke-width: 1.8; }
+    .title { font-size: 14px; font-weight: 700; fill: #1d2232; }
+    .sub { font-size: 11.5px; fill: #5d6474; }
+    .tiny { font-size: 10.5px; fill: #5d6474; }
+    .lbl { font-size: 10.5px; fill: #6b5bb5; font-weight: 600; }
+    .lblg { font-size: 10.5px; fill: #7d8294; }
+    .line { stroke: #6b5bb5; stroke-width: 1.6; fill: none; marker-end: url(#arrow); }
+    .lineg { stroke: #8a8fa3; stroke-width: 1.4; fill: none; marker-end: url(#arrowgrey); stroke-dasharray: 5 4; }
+  </style>
+
+  <!-- Browser -->
+  <rect class="box" x="30" y="24" width="250" height="78"/>
+  <text class="title" x="46" y="50">Browser — React 18 + TypeScript</text>
+  <text class="sub" x="46" y="70">Boardroom, My Board, Company Intelligence</text>
+  <text class="sub" x="46" y="88">Reads SSE with fetch, replays from a cursor</text>
+
+  <!-- API -->
+  <rect class="box" x="30" y="150" width="250" height="78"/>
+  <text class="title" x="46" y="176">FastAPI — 41 routes</text>
+  <text class="sub" x="46" y="196">JWT auth; org scope resolved server-side</text>
+  <text class="sub" x="46" y="214">36 of 41 routes reject an unauthenticated call</text>
+
+  <!-- Orchestrator -->
+  <rect class="accent" x="30" y="276" width="250" height="96" rx="8"/>
+  <text class="title" x="46" y="302">Meeting orchestrator</text>
+  <text class="sub" x="46" y="322">Six-stage state machine, one meeting per run</text>
+  <text class="sub" x="46" y="340">Budget ceilings: requests, tokens, cost</text>
+  <text class="sub" x="46" y="358">Commits every event before emitting it</text>
+
+  <!-- Agents -->
+  <rect class="accent" x="350" y="150" width="265" height="222" rx="8"/>
+  <text class="title" x="366" y="176">Nine Pydantic AI agents</text>
+  <text class="sub" x="366" y="195">one model: gpt-6-luna, via Portkey</text>
+
+  <rect x="366" y="208" width="233" height="30" rx="5" fill="#ffffff" stroke="#7c5cd6" stroke-width="1.4"/>
+  <text class="sub" x="378" y="227"><tspan font-weight="700" fill="#1d2232">Chairperson</tspan> — agenda, debate plan, brief</text>
+
+  <rect x="366" y="248" width="233" height="112" rx="5" fill="#ffffff" stroke="#c9cddb" stroke-width="1.3"/>
+  <text class="tiny" x="378" y="266"><tspan font-weight="700" fill="#1d2232">CEO</tspan> strategy  ·  <tspan font-weight="700" fill="#1d2232">COO</tspan> capacity</text>
+  <text class="tiny" x="378" y="284"><tspan font-weight="700" fill="#1d2232">CFO</tspan> runway  ·  <tspan font-weight="700" fill="#1d2232">CGO</tspan> growth</text>
+  <text class="tiny" x="378" y="302"><tspan font-weight="700" fill="#1d2232">Customer Advocate</tspan> churn evidence</text>
+  <text class="tiny" x="378" y="320"><tspan font-weight="700" fill="#1d2232">Competitive Intel</tspan> market threats</text>
+  <text class="tiny" x="378" y="338"><tspan font-weight="700" fill="#1d2232">General Counsel</tspan> regulatory risk</text>
+  <text class="tiny" x="378" y="354"><tspan font-weight="700" fill="#1d2232">Strategy Consultant</tspan> disagrees by remit</text>
+
+  <!-- MCP -->
+  <rect class="box" x="672" y="150" width="218" height="130"/>
+  <text class="title" x="688" y="176">MCP server (in-process)</text>
+  <text class="sub" x="688" y="195">FastMCP · 10 tools · 3 scopes</text>
+  <text class="tiny" x="688" y="220"><tspan font-weight="700" fill="#1d2232">company</tspan>  profile, goals, search, history</text>
+  <text class="tiny" x="688" y="240"><tspan font-weight="700" fill="#1d2232">financial</tspan>  runway, unit economics</text>
+  <text class="tiny" x="688" y="260"><tspan font-weight="700" fill="#1d2232">operations</tspan>  capacity, dependencies</text>
+
+  <!-- Scope note -->
+  <rect x="672" y="296" width="218" height="76" rx="8" fill="#fdf3f3" stroke="#c75c5c" stroke-width="1.5"/>
+  <text class="title" x="688" y="320" font-size="12.5">No tool takes an org id</text>
+  <text class="tiny" x="688" y="338">Scope comes from a contextvar the</text>
+  <text class="tiny" x="688" y="354">orchestrator binds around each run, so</text>
+  <text class="tiny" x="688" y="368">a model has nowhere to put a fake one.</text>
+
+  <!-- Postgres -->
+  <rect class="data" x="30" y="432" width="860" height="118" rx="8"/>
+  <text class="title" x="46" y="458">PostgreSQL 17 — 23 tables</text>
+  <text class="sub" x="46" y="478">meeting_events (the transcript, append-only, one commit per event — this is what SSE tails)</text>
+  <text class="sub" x="46" y="498">company_memory + document_chunks (provenance on every row, full-text search with generated tsvectors)</text>
+  <text class="sub" x="46" y="518">llm_usage_records · tool_invocations (every model call and tool call audited: 82 tool calls recorded so far)</text>
+  <text class="sub" x="46" y="538">strategic_decisions · action_items · meeting_interventions</text>
+
+  <!-- arrows -->
+  <path class="line" d="M 155 102 L 155 148"/>
+  <text class="lbl" x="163" y="130">REST + SSE</text>
+  <path class="lineg" d="M 128 148 L 128 104"/>
+  <text class="lblg" x="20" y="130">events</text>
+
+  <path class="line" d="M 155 228 L 155 274"/>
+  <text class="lbl" x="163" y="256">start / pause / interrupt</text>
+
+  <path class="line" d="M 282 310 L 348 262"/>
+  <text class="lbl" x="286" y="300">prompts each agent</text>
+
+  <path class="line" d="M 617 240 L 670 222"/>
+  <text class="lbl" x="612" y="214">tool calls</text>
+
+  <path class="line" d="M 160 372 L 160 430"/>
+  <text class="lbl" x="168" y="406">persists every stage</text>
+
+  <path class="line" d="M 760 372 L 760 430"/>
+  <text class="lbl" x="620" y="406">reads scoped company data</text>
+</svg>

@@ -1,0 +1,90 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 430" width="920" height="430" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#7c5cd6"/>
+    </marker>
+  </defs>
+  <style>
+    .stage { fill:#ffffff; stroke:#7c5cd6; stroke-width:1.8; rx:8; }
+    .who { font-size:10.5px; fill:#7c5cd6; font-weight:700; letter-spacing:.4px; }
+    .nm { font-size:13.5px; font-weight:700; fill:#1d2232; }
+    .d { font-size:11px; fill:#5d6474; }
+    .cost { font-size:10.5px; fill:#3f9e7c; font-weight:700; }
+    .arr { stroke:#7c5cd6; stroke-width:1.8; fill:none; marker-end:url(#a2); }
+    .note { font-size:11px; fill:#5d6474; }
+    .hdr { font-size:12px; font-weight:700; fill:#1d2232; }
+  </style>
+
+  <text class="hdr" x="24" y="24">One meeting, six stages. Measured averages per stage from 15 real runs.</text>
+
+  <!-- 1 -->
+  <rect class="stage" x="24" y="44" width="412" height="62"/>
+  <text class="who" x="40" y="64">CHAIRPERSON · 1 CALL</text>
+  <text class="nm" x="40" y="83">1. Agenda</text>
+  <text class="d" x="150" y="83">Reframes the question, picks 3–6 executives, names the tensions</text>
+  <text class="cost" x="340" y="64">2,478 tokens</text>
+
+  <!-- 2 -->
+  <rect class="stage" x="24" y="118" width="412" height="62"/>
+  <text class="who" x="40" y="138">EVERY EXECUTIVE · CONCURRENT</text>
+  <text class="nm" x="40" y="157">2. Assessments</text>
+  <text class="d" x="190" y="157">Independent. No agent sees another's answer</text>
+  <text class="cost" x="320" y="138">4,935 tokens each</text>
+
+  <!-- 3 -->
+  <rect class="stage" x="24" y="192" width="412" height="62"/>
+  <text class="who" x="40" y="212">CHAIRPERSON · 1 CALL</text>
+  <text class="nm" x="40" y="231">3. Debate plan</text>
+  <text class="d" x="165" y="231">Finds the real conflicts and assigns who challenges whom</text>
+  <text class="cost" x="340" y="212">3,066 tokens</text>
+
+  <!-- 4 -->
+  <rect class="stage" x="24" y="266" width="412" height="62"/>
+  <text class="who" x="40" y="286">ASSIGNED CHALLENGERS</text>
+  <text class="nm" x="40" y="305">4. Objections</text>
+  <text class="d" x="160" y="305">Each attacks one named claim, with a severity</text>
+  <text class="cost" x="320" y="286">2,932 tokens each</text>
+
+  <!-- 5 -->
+  <rect class="stage" x="24" y="340" width="412" height="62"/>
+  <text class="who" x="40" y="360">EVERY CHALLENGED EXECUTIVE</text>
+  <text class="nm" x="40" y="379">5. Revisions</text>
+  <text class="d" x="155" y="379">Holds or changes position. Both are recorded</text>
+  <text class="cost" x="320" y="360">2,174 tokens each</text>
+
+  <!-- 6 -->
+  <rect class="stage" x="486" y="192" width="410" height="110"/>
+  <text class="who" x="502" y="212">CHAIRPERSON · 1 CALL</text>
+  <text class="nm" x="502" y="233">6. Decision brief</text>
+  <text class="cost" x="800" y="212">11,362 tokens</text>
+  <text class="d" x="502" y="255">Options, a recommendation, financial and legal</text>
+  <text class="d" x="502" y="272">implications, dissent that was not resolved, and</text>
+  <text class="d" x="502" y="289">an action plan. The most expensive single call.</text>
+
+  <!-- flow arrows -->
+  <path class="arr" d="M 230 106 L 230 116"/>
+  <path class="arr" d="M 230 180 L 230 190"/>
+  <path class="arr" d="M 230 254 L 230 264"/>
+  <path class="arr" d="M 230 328 L 230 338"/>
+  <path class="arr" d="M 438 371 C 470 371 470 310 484 300"/>
+
+  <!-- loop -->
+  <path class="arr" d="M 436 297 C 466 297 466 223 438 223" stroke-dasharray="5 4"/>
+  <text class="note" x="446" y="265" font-size="10">up to</text>
+  <text class="note" x="446" y="278" font-size="10">2 rounds</text>
+
+  <!-- side notes -->
+  <rect x="486" y="44" width="410" height="128" rx="8" fill="#f7f8fb" stroke="#c9cddb" stroke-width="1.4"/>
+  <text class="hdr" x="502" y="66">Why stage 2 runs concurrently and alone</text>
+  <text class="note" x="502" y="88">If executives saw each other's answers they would converge,</text>
+  <text class="note" x="502" y="106">and nine agreeing agents are worth no more than one. Each</text>
+  <text class="note" x="502" y="124">assessment is produced from the company record only, so the</text>
+  <text class="note" x="502" y="142">disagreement in stage 4 is real disagreement rather than</text>
+  <text class="note" x="502" y="160">performance. Concurrency also cuts wall-clock by about half.</text>
+
+  <rect x="486" y="318" width="410" height="84" rx="8" fill="#eef6f2" stroke="#3f9e7c" stroke-width="1.5"/>
+  <text class="hdr" x="502" y="340">A whole Executive Meeting</text>
+  <text class="note" x="502" y="362">13 completed runs: 62,475 tokens on average, 54 seconds,</text>
+  <text class="note" x="502" y="380">28,310 at the cheapest and 108,065 at the dearest.</text>
+  <text class="note" x="502" y="396">A Full Board is 104,348 tokens and 94 seconds.</text>
+</svg>

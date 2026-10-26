@@ -187,6 +187,7 @@ export interface Meeting {
   debate_rounds_used: number
   model_requests_used: number
   input_tokens_used: number
+  cached_input_tokens_used: number
   output_tokens_used: number
   total_tokens_used: number
   estimated_cost_usd: number

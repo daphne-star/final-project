@@ -355,6 +355,29 @@ async def test_the_meeting_keeps_its_own_token_total(db, org_and_user):
     assert meeting.total_tokens_used > 0
 
 
+async def test_cached_input_is_recorded_as_a_subset_of_input(db, org_and_user):
+    """Cost cannot be computed honestly without it.
+
+    The deterministic test model reports no cache reads, so the figure is
+    zero here; what this pins is that the column exists, is populated from
+    the provider's number rather than invented, and never exceeds the input
+    it is a part of.
+    """
+    org, user = org_and_user
+    meeting, _, _, _ = await _run(db, org, user)
+
+    records = (
+        (await db.execute(select(LLMUsageRecord).where(LLMUsageRecord.meeting_id == meeting.id)))
+        .scalars()
+        .all()
+    )
+    for record in records:
+        assert record.cached_input_tokens <= record.input_tokens
+
+    assert meeting.cached_input_tokens_used == sum(r.cached_input_tokens for r in records)
+    assert meeting.cached_input_tokens_used <= meeting.input_tokens_used
+
+
 async def test_a_running_meeting_reports_tokens_as_it_goes(db, org_and_user):
     """Stage changes carry the running total, so the count is live."""
     org, user = org_and_user

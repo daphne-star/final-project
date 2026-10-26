@@ -89,6 +89,10 @@ class Meeting(Base, UUIDMixin, TimestampMixin):
     #: Split rather than one total, because cost is priced per direction and
     #: the split is what LLMUsageRecord already stores per call.
     input_tokens_used: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    #: Subset of input_tokens_used that came from the provider's prompt cache.
+    cached_input_tokens_used: Mapped[int] = mapped_column(
+        Integer, default=0, nullable=False
+    )
     output_tokens_used: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     estimated_cost_usd: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
 

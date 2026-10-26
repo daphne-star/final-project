@@ -34,6 +34,10 @@ class LLMUsageRecord(Base, UUIDMixin, TimestampMixin):
 
     request_count: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     input_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    #: The part of input_tokens the provider served from its prompt cache.
+    #: Billed at a fraction of fresh input, so cost cannot be computed
+    #: honestly without it.
+    cached_input_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     output_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     total_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     estimated_cost_usd: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)

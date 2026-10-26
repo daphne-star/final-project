@@ -69,6 +69,9 @@ class MeetingRead(ORMModel):
     debate_rounds_used: int
     model_requests_used: int
     input_tokens_used: int
+    #: Subset of input_tokens_used served from the provider's prompt cache,
+    #: which is billed at a fraction of fresh input.
+    cached_input_tokens_used: int
     output_tokens_used: int
     #: Read off the ORM property, so the API cannot report a total that
     #: disagrees with its own parts.
