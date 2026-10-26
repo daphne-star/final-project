@@ -15,6 +15,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.api.router import api_router
 from app.core.config import settings
 from app.db.session import engine
+from app.orchestration.stream import reconcile_orphaned_meetings
 from app.schemas.common import ErrorDetail, ErrorResponse
 
 logging.basicConfig(
@@ -27,6 +28,14 @@ logger = logging.getLogger("ghostboard")
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     logger.info("Ghost Board starting in %s mode", settings.environment)
+    # Meetings run as in-process tasks, so a restart orphans anything that was
+    # mid-flight. Mark those failed rather than leaving them stuck at RUNNING.
+    try:
+        orphaned = await reconcile_orphaned_meetings()
+        if orphaned:
+            logger.warning("Marked %d orphaned meeting(s) as failed", orphaned)
+    except Exception:
+        logger.exception("Startup reconciliation failed; continuing")
     yield
     await engine.dispose()
     logger.info("Ghost Board shut down")

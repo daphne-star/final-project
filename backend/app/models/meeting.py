@@ -48,6 +48,21 @@ class Meeting(Base, UUIDMixin, TimestampMixin):
     created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL")
     )
+    #: Devil's Advocate stress-tests an existing decision; this is the one.
+    #: strategic_decisions already points back at meetings, so this closes a
+    #: cycle. use_alter makes SQLAlchemy add and drop the constraint
+    #: separately from the tables, which is what lets create_all/drop_all
+    #: order them at all.
+    subject_decision_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey(
+            "strategic_decisions.id",
+            ondelete="SET NULL",
+            use_alter=True,
+            name="fk_meetings_subject_decision",
+        ),
+        index=True,
+    )
 
     title: Mapped[str] = mapped_column(String(300), nullable=False)
     question: Mapped[str] = mapped_column(Text, nullable=False)

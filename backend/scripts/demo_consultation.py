@@ -25,6 +25,17 @@ from app.agents.provider import provider_is_configured
 from app.agents.registry import REGISTRY, AgentId
 from app.core.config import settings
 
+
+def _force_utf8_stdout() -> None:
+    """The Windows console defaults to cp1252, which cannot encode the minus
+    signs, dashes, and quotes the model returns. Reconfigure rather than let a
+    successful run die while printing its own output."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors="replace")
+
+
 NORTHSTAR = CompanyContext(
     company_name="Northstar Labs",
     industry="B2B SaaS",
@@ -106,6 +117,7 @@ async def consult(agent_id: AgentId, question: str) -> None:
 
 
 async def main() -> int:
+    _force_utf8_stdout()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--agents",

@@ -1,16 +1,20 @@
 import { useState } from 'react'
 import { NavLink, Outlet } from 'react-router-dom'
+import { useQueryClient } from '@tanstack/react-query'
 import {
   Building2,
+  Gavel,
   LayoutDashboard,
+  LogOut,
   Menu,
-  ScrollText,
   Users,
   X,
   type LucideIcon,
 } from 'lucide-react'
 
 import { useHealth } from '@/api/agents'
+import { logout } from '@/api/auth'
+import { useMe } from '@/api/consultations'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 
@@ -23,7 +27,7 @@ interface NavItem {
 const NAV: NavItem[] = [
   { to: '/', label: 'Dashboard', icon: LayoutDashboard },
   { to: '/board', label: 'My Board', icon: Users },
-  { to: '/decisions', label: 'Decisions', icon: ScrollText },
+  { to: '/meetings', label: 'Meetings', icon: Gavel },
   { to: '/company', label: 'Company', icon: Building2 },
 ]
 
@@ -32,6 +36,15 @@ export function AppShell() {
 
   return (
     <div className="relative z-10 flex min-h-dvh flex-col lg:flex-row">
+      {/* Keyboard users land here first: four nav links stand between the top
+          of every page and its content, so give them one key to skip. */}
+      <a
+        href="#main"
+        className="sr-only focus:not-sr-only focus:absolute focus:left-3 focus:top-3 focus:z-50 focus:rounded-md focus:bg-surface-raised focus:px-3 focus:py-2 focus:text-sm focus:text-ink"
+      >
+        Skip to content
+      </a>
+
       {/* Mobile bar */}
       <header className="flex items-center justify-between border-b border-line bg-surface/80 px-4 py-3 backdrop-blur lg:hidden">
         <Wordmark />
@@ -48,7 +61,9 @@ export function AppShell() {
 
       <aside
         className={cn(
-          'border-line bg-surface/60 lg:flex lg:w-60 lg:shrink-0 lg:flex-col lg:border-r',
+          // Sticky on large screens: nav and the sign-out control sat at the
+          // bottom of the *document*, so on a long page they scrolled away.
+          'border-line bg-surface/60 lg:sticky lg:top-0 lg:flex lg:h-dvh lg:w-60 lg:shrink-0 lg:flex-col lg:overflow-y-auto lg:border-r',
           mobileOpen ? 'block border-b lg:border-b-0' : 'hidden',
         )}
       >
@@ -56,7 +71,7 @@ export function AppShell() {
           <Wordmark />
         </div>
 
-        <nav className="flex flex-col gap-1 p-3 lg:px-3 lg:py-0">
+        <nav aria-label="Main" className="flex flex-col gap-1 p-3 lg:px-3 lg:py-0">
           {NAV.map(({ to, label, icon: Icon }) => (
             <NavLink
               key={to}
@@ -78,12 +93,13 @@ export function AppShell() {
           ))}
         </nav>
 
-        <div className="mt-auto hidden p-4 lg:block">
+        <div className="mt-auto hidden space-y-2 p-4 lg:block">
+          <SignedInAs />
           <BackendStatus />
         </div>
       </aside>
 
-      <main className="min-w-0 flex-1">
+      <main id="main" className="min-w-0 flex-1">
         <Outlet />
       </main>
     </div>
@@ -104,6 +120,33 @@ function Wordmark() {
         </svg>
       </span>
       <span className="font-display text-lg leading-none tracking-tight">Ghost Board</span>
+    </div>
+  )
+}
+
+function SignedInAs() {
+  const { data: me } = useMe()
+  const qc = useQueryClient()
+  if (!me) return null
+
+  const org = me.organizations.find(
+    (o) => o.organization.id === me.active_organization_id,
+  )?.organization
+
+  return (
+    <div className="flex items-center gap-2 text-xs text-ink-muted">
+      <span className="min-w-0 flex-1 truncate" title={`${me.user.email}${org ? ` — ${org.name}` : ''}`}>
+        {org?.name ?? me.user.email}
+      </span>
+      <Button
+        variant="ghost"
+        size="sm"
+        className="h-7 shrink-0 px-2"
+        onClick={() => logout(qc)}
+      >
+        <LogOut className="size-3.5" />
+        Sign out
+      </Button>
     </div>
   )
 }

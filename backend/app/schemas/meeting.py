@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 
 from pydantic import BaseModel, Field
 
 from app.models.enums import (
+    ActionItemStatus,
     ConfidenceLevel,
     DecisionStatus,
     MeetingMode,
@@ -17,6 +18,7 @@ from app.models.enums import (
     Priority,
     Severity,
 )
+from app.models.intervention import InterventionKind, InterventionStatus
 from app.schemas.common import ORMModel
 
 
@@ -26,6 +28,21 @@ class MeetingCreate(BaseModel):
     mode: MeetingMode = MeetingMode.EXECUTIVE_MEETING
     start_immediately: bool = Field(
         default=True, description="Begin the workflow in the background on creation"
+    )
+    subject_decision_id: uuid.UUID | None = Field(
+        default=None,
+        description=(
+            "The decision to stress-test. Required for devils_advocate mode "
+            "and ignored by the others."
+        ),
+    )
+    participant_agent_ids: list[str] | None = Field(
+        default=None,
+        max_length=8,
+        description=(
+            "Executives to invite. The Chairperson always attends and must not "
+            "be listed. Omit to let the Chair pick from the default pool."
+        ),
     )
 
 
@@ -39,6 +56,7 @@ class ParticipantRead(ORMModel):
 class MeetingRead(ORMModel):
     id: uuid.UUID
     organization_id: uuid.UUID
+    subject_decision_id: uuid.UUID | None = None
     title: str
     question: str
     mode: MeetingMode
@@ -146,6 +164,7 @@ class MeetingDetail(MeetingRead):
     objections: list[ObjectionRead] = Field(default_factory=list)
     revisions: list[RevisionRead] = Field(default_factory=list)
     decision: DecisionRead | None = None
+    interventions: list[InterventionRead] = Field(default_factory=list)
 
 
 class MeetingEventRead(ORMModel):
@@ -162,3 +181,46 @@ class DecisionUpdate(BaseModel):
 
     status: DecisionStatus
     decision_notes: str | None = Field(default=None, max_length=4000)
+
+
+class InterventionCreate(BaseModel):
+    """A founder interrupting a live meeting to address one executive."""
+
+    agent_id: str = Field(description="Which executive to address")
+    kind: InterventionKind = InterventionKind.ASK
+    prompt: str = Field(min_length=3, max_length=4000)
+    about_agent_id: str | None = Field(
+        default=None,
+        description="For critique_colleague: whose conclusion to examine",
+    )
+
+
+class InterventionRead(ORMModel):
+    id: uuid.UUID
+    agent_id: str
+    about_agent_id: str | None
+    kind: InterventionKind
+    prompt: str
+    status: InterventionStatus
+    answered_at_stage: str | None
+    response: str | None
+    structured_response: dict | None
+    error_message: str | None
+    answered_at: datetime | None
+    duration_ms: int | None
+    created_at: datetime
+
+
+class ActionItemUpdate(BaseModel):
+    status: ActionItemStatus | None = None
+    suggested_owner: str | None = Field(default=None, max_length=200)
+    priority: Priority | None = None
+    target_date: date | None = None
+    outcome_notes: str | None = Field(default=None, max_length=4000)
+
+
+class ActionItemDetail(ActionItemRead):
+    decision_id: uuid.UUID | None
+    target_date: date | None
+    outcome_notes: str | None
+    created_at: datetime

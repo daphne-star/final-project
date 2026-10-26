@@ -3,12 +3,19 @@
 An AI executive boardroom. Nine distinct Pydantic AI agents assess a strategic
 question independently, debate it, and produce a decision brief you can act on.
 
-**Status: Phases 1–4 of 9 complete (backend).** Foundation, visual identity,
-the Pydantic AI agent engine, and the multi-agent board meeting engine are
-built and tested. You can hold a one-on-one consultation with any of the
-eight consultable executives, and convene a real board meeting with
-independent assessments, evidence-based debate, revisions, and a decision
-brief. The live boardroom UI and SSE streaming are still to come.
+**Status: all nine phases complete.** Foundation, visual identity, the
+Pydantic AI agent engine, the multi-agent meeting engine, and the live
+streaming boardroom are built and tested. You can convene a board meeting
+from the UI and watch the Chairperson and four executives analyse, argue,
+and revise in real time, then read the decision brief. Refreshing mid-meeting
+rebuilds the transcript and resumes the stream. Executives call real MCP
+tools for company data and financial or operational arithmetic. Five meeting
+modes run from a single executive up to the full nine-agent board, and the
+board reasons over documents you upload. You can interrupt a meeting in
+progress to put something to one executive directly, pause it, and export the
+brief. Phase 9 added a token and cost ceiling that can actually bind, an
+authorization sweep over every route, keyboard and screen-reader support
+across all pages, and a halving of the test suite's runtime.
 
 See [docs/IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md) for what is
 verified versus merely implemented, and
@@ -112,6 +119,9 @@ Or convene a full board meeting on the seeded Northstar Labs company:
 cd backend && ./.venv/Scripts/python.exe -m scripts.demo_meeting
 ```
 
+In the UI, go to **Meetings → New meeting**, pick a question and who attends,
+and watch it happen live.
+
 ## Layout
 
 ```
@@ -129,19 +139,24 @@ final-project/
 │   │   ├── api/                 # routes + auth/org dependencies
 │   │   ├── core/                # settings, security
 │   │   ├── db/                  # engine, session, declarative base
-│   │   ├── orchestration/       # meeting state machine + typed events
-│   │   ├── services/            # consultation and meeting services
-│   │   ├── models/              # 22 ORM entities
+│   │   ├── mcp/                 # FastMCP server, auth context, tools
+│   │   ├── orchestration/       # state machine, modes, events, interventions, SSE
+│   │   ├── services/            # consultation, meeting, knowledge, ingestion, export
+│   │   ├── models/              # 23 ORM entities
 │   │   └── schemas/             # request/response models
-│   ├── alembic/versions/        # 0001_initial, 0002_consult_msgs
-│   ├── scripts/                 # demo_consultation.py, demo_meeting.py
+│   ├── alembic/versions/        # 0001_initial .. 0005_interventions
+│   ├── scripts/                 # demo_consultation, demo_meeting, demo_mcp
 │   └── tests/
 └── frontend/
     └── src/
         ├── assets/executives/   # nine original SVG portraits
         ├── components/agents/   # ExecutiveCard, ExecutiveDetail
+        ├── components/boardroom/      # rail, transcript, sidebar, progress, announcer
         ├── components/consultations/  # StructuredPanels
+        ├── hooks/               # useMeetingStream
+        ├── lib/boardroomState.ts  # pure event reducer
         ├── components/auth/     # AuthGate
+        ├── components/ErrorBoundary.tsx
         ├── components/ui/       # shadcn-convention primitives
         └── pages/
 ```
@@ -159,9 +174,45 @@ silhouette, palette, emblem and accessory, and is identifiable without reading
 the name. `ExecutiveCard` throws rather than falling back to a placeholder if a
 portrait is missing — the illustrations are product, not decoration.
 
+**An intervention is a row, not a button.** Interrupting a meeting writes a
+queued record that the running orchestrator drains at its next checkpoint —
+between stages, never inside one — so a founder cannot corrupt a round in
+flight, and the exchange survives in the meeting's history.
+
+**Nothing an agent infers becomes a fact.** Every stored item carries its
+provenance, `USER_CONFIRMED` requires a human id at the database write, and
+corrections supersede rather than overwrite. Retrieved records reach agents
+labelled VERIFIED or UNVERIFIED and wrapped as data, never instructions.
+
+**No MCP tool takes an organization id.** Scope comes from a context the
+orchestrator binds around each agent run, so a model has nowhere to put a
+spoofed id. Per-role filtering keeps each executive's tool list short; the
+server re-checks the scope on every call, so filtering is convenience and the
+server check is the boundary.
+
+**Streaming reads the database, not a queue.** The SSE endpoint tails the
+persisted event log, so reconnection is just "read after cursor N" and a
+client that joins late — or after the meeting ended — sees the identical
+ordered history. The orchestrator commits each event as it is emitted, which
+is what makes that readable from another session. The trade is ~0.4s of
+latency for durability without Redis.
+
 **Organization scope is server-side.** `X-Organization-Id` only selects among
 orgs the authenticated user already belongs to; it can never widen access. No
 model-supplied org id is ever trusted for authorization.
+
+**An unknown cost is not a zero.** Pydantic AI has no price table for
+`gpt-6-luna`, so every usage row used to record `0.00` and the configured cost
+ceiling enforced nothing. Prices now come from `MODEL_PRICES`; with none set,
+`estimate_cost` returns `None` and says so. Backing it up is a token ceiling,
+which is enforceable whether or not anyone configured a price, because token
+counts are always known.
+
+**The transcript announces arrivals, not contents.** Assessments run to a
+couple of hundred words and three can land at once, so piping the transcript
+into a live region would be unusable. A visually hidden `role="log"` announces
+who spoke and what kind of turn it was; the transcript itself is a list of
+headings a screen-reader user walks at their own pace.
 
 **Provenance is a column, not a convention.** `CompanyMemory.source_kind`
 records whether a fact was user-confirmed, imported from a document, or
@@ -175,10 +226,10 @@ company fact.
 | 1 | Monorepo, FastAPI, Postgres schema, auth, navigation | Done |
 | 2 | Nine portraits, executive cards, My Board, design system | Done |
 | 3 | Pydantic AI agent factory, consultations | Done |
-| 4 | Meeting engine: agenda, assessments, debate, revision, synthesis | Done (backend) |
-| 4b | Live boardroom UI + SSE streaming | Next |
-| 5 | MCP server and tools | |
-| 6 | All nine agents, Full Board / Devil's Advocate modes | |
-| 7 | Company intelligence, documents, memory | |
-| 8 | Interventions, pause/resume, export | |
-| 9 | Reliability, accessibility, polish | |
+| 4 | Meeting engine: agenda, assessments, debate, revision, synthesis | Done |
+| 4b | SSE streaming + live boardroom UI | Done |
+| 5 | MCP server and tools | Done |
+| 6 | All nine agents, Full Board / Devil's Advocate modes | Done |
+| 7 | Company intelligence, documents, memory | Done |
+| 8 | Interventions, pause/resume, export | Done |
+| 9 | Reliability, accessibility, polish | Done |

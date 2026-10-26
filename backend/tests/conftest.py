@@ -10,12 +10,19 @@ from __future__ import annotations
 
 import asyncio
 import os
+
+# Set before app.core.security builds its CryptContext: bcrypt at the
+# production work factor costs ~0.4s per hash, and the suite creates a
+# user per test.
+os.environ.setdefault("BCRYPT_ROUNDS", "4")
 from collections.abc import AsyncIterator
 
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
+    AsyncConnection,
     AsyncEngine,
     AsyncSession,
     async_sessionmaker,
@@ -51,7 +58,14 @@ def schema() -> None:
         eng = create_async_engine(TEST_DATABASE_URL, poolclass=NullPool)
         try:
             async with eng.begin() as conn:
-                await conn.run_sync(Base.metadata.drop_all)
+                # Drop the schema rather than Base.metadata.drop_all. drop_all
+                # emits DROP CONSTRAINT by the *current* model's name, which
+                # fails against a database built by an earlier version of the
+                # models — exactly what happens when a constraint gets renamed
+                # or switched to use_alter. Dropping the schema is immune to
+                # that and also clears orphaned enum types.
+                await conn.execute(text("DROP SCHEMA public CASCADE"))
+                await conn.execute(text("CREATE SCHEMA public"))
                 await conn.run_sync(Base.metadata.create_all)
         finally:
             await eng.dispose()
@@ -61,25 +75,53 @@ def schema() -> None:
 
 @pytest_asyncio.fixture
 async def engine(schema) -> AsyncIterator[AsyncEngine]:
-    """A fresh engine per test, bound to that test's event loop."""
+    """An engine per test, bound to that test's event loop.
+
+    Still per-test: pytest-asyncio gives each test its own loop by default
+    and asyncpg connections cannot cross loops. NullPool avoids keeping a
+    pooled connection alive past the loop that opened it, which would raise
+    on the next test.
+    """
     eng = create_async_engine(TEST_DATABASE_URL, poolclass=NullPool)
     yield eng
     await eng.dispose()
 
 
 @pytest_asyncio.fixture
-async def db(engine: AsyncEngine) -> AsyncIterator[AsyncSession]:
-    """A session wrapped in a transaction that is rolled back after the test."""
+async def db_connection(engine: AsyncEngine) -> AsyncIterator[AsyncConnection]:
+    """The AsyncConnection the test transaction runs on.
+
+    Exposed separately so code that opens its own sessions in production —
+    the SSE stream does — can be pointed at the same uncommitted transaction.
+    """
     conn = await engine.connect()
     trans = await conn.begin()
-    maker = async_sessionmaker(bind=conn, expire_on_commit=False, autoflush=False)
+    try:
+        yield conn
+    finally:
+        await trans.rollback()
+        await conn.close()
+
+
+@pytest_asyncio.fixture
+async def db(db_connection: AsyncConnection) -> AsyncIterator[AsyncSession]:
+    """A session on the test transaction, rolled back after the test."""
+    conn = db_connection
+    maker = async_sessionmaker(
+        bind=conn,
+        expire_on_commit=False,
+        autoflush=False,
+        # The orchestrator commits each event so the SSE stream can see it.
+        # Savepoints keep those commits inside the test transaction, so the
+        # per-test rollback still cleans up.
+        join_transaction_mode="create_savepoint",
+    )
     session = maker()
     try:
         yield session
     finally:
+        # The connection fixture owns the transaction and the rollback.
         await session.close()
-        await trans.rollback()
-        await conn.close()
 
 
 @pytest_asyncio.fixture

@@ -20,6 +20,7 @@ from app.orchestration.meeting import (
     MeetingCancelled,
     MeetingLimits,
     MeetingOrchestrator,
+    summarize_agent_error,
 )
 from app.services import meeting as svc
 from app.services.consultation import load_company_context
@@ -495,8 +496,38 @@ async def test_model_request_ceiling_aborts_the_meeting(db, org_and_user):
 
     with pytest.raises(MeetingAborted) as excinfo:
         await orch.run()
-    assert excinfo.value.code == "model_request_limit"
+    assert excinfo.value.code == "usage_limit"
+    assert "model request ceiling" in str(excinfo.value)
     assert meeting.status is MeetingStatus.FAILED
+
+
+async def test_the_token_ceiling_is_enforceable_without_pricing(db, org_and_user):
+    """Tokens are always known, so this ceiling works even when cost does not."""
+    org, user = org_and_user
+    meeting = await _make_meeting(db, org, user)
+    _board, model = scripted_board()
+    company = await load_company_context(db, org.id)
+    orch = MeetingOrchestrator(
+        db,
+        meeting,
+        company,
+        model=model,
+        limits=MeetingLimits(max_total_tokens=1, model_timeout_seconds=10),
+        user_id=user.id,
+    )
+
+    with pytest.raises(MeetingAborted) as excinfo:
+        await orch.run()
+    assert excinfo.value.code == "usage_limit"
+    assert "token ceiling" in str(excinfo.value)
+
+
+async def test_cost_is_unknown_rather_than_zero_without_a_price(db, org_and_user):
+    org, user = org_and_user
+    _meeting, _board, orch, _ = await _run(db, org, user)
+    # No MODEL_PRICES configured in the test environment.
+    assert orch.budget.cost_known is False
+    assert orch.budget.estimated_cost_usd == 0.0
 
 
 async def test_debate_rounds_are_bounded(db, org_and_user):
@@ -630,3 +661,71 @@ async def test_orchestrator_uses_company_context_passed_in(db, org_and_user):
 
     for call in board.of_kind("assessment"):
         assert "No company profile has been entered" in call.instructions
+
+
+# ---------------------------------------------------------------------------
+# What a failure says to the user
+# ---------------------------------------------------------------------------
+
+
+class _ModelHTTPError(Exception):
+    """Stands in for a provider error, which carries the response body."""
+
+
+@pytest.mark.parametrize(
+    ("exc", "expected"),
+    [
+        (
+            _ModelHTTPError("status_code: 429, body: {'message': 'Rate limit reached'}"),
+            "rate-limiting",
+        ),
+        (
+            _ModelHTTPError("status_code: 401, body: {'code': 'invalid_api_key'}"),
+            "credentials",
+        ),
+        (TimeoutError(), "within the time limit"),
+        (_ModelHTTPError("Connection refused"), "could not be reached"),
+    ],
+)
+def test_provider_failures_are_explained_not_dumped(exc, expected):
+    summary = summarize_agent_error(exc)
+    assert expected in summary
+    # The exception type stays, so a log line can still be matched to it.
+    assert type(exc).__name__ in summary
+
+
+def test_an_unrecognised_failure_keeps_its_first_line_and_is_bounded():
+    """A raw provider blob would otherwise reach the exported brief verbatim."""
+    exc = ValueError("Could not parse output\n" + "detail " * 500)
+    summary = summarize_agent_error(exc)
+    assert summary == "ValueError: Could not parse output"
+    assert len(summary) <= 200
+
+
+def test_a_failure_with_no_message_still_names_itself():
+    assert summarize_agent_error(RuntimeError()) == "RuntimeError"
+
+
+async def test_a_chair_failure_reaches_the_user_as_a_sentence(db, org_and_user):
+    """failure_reason is shown in the boardroom and exported; keep it short."""
+    from pydantic_ai.models.function import FunctionModel
+
+    org, user = org_and_user
+    meeting = await _make_meeting(db, org, user)
+
+    async def always_fails(messages, info):
+        raise _ModelHTTPError("status_code: 429, body: {'message': 'Rate limit reached'}")
+
+    orch = MeetingOrchestrator(
+        db,
+        meeting,
+        await load_company_context(db, org.id),
+        model=FunctionModel(always_fails, model_name="failing"),
+        user_id=user.id,
+    )
+    with pytest.raises(MeetingAborted):
+        await orch.run()
+
+    assert meeting.status is MeetingStatus.FAILED
+    assert "rate-limiting" in (meeting.failure_reason or "")
+    assert len(meeting.failure_reason or "") < 400

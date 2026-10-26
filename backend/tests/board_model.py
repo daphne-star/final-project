@@ -238,6 +238,20 @@ class ScriptedBoard:
             "evidence_considered": ["Runway of 12 months", "Committed delivery capacity"],
         }
 
+    def _consultation(self, agent_id: str | None) -> dict[str, Any]:
+        """Interventions run through the consultation agent."""
+        return {
+            "answer": f"{agent_id} answering the founder directly.",
+            "key_points": ["Point for the founder"],
+            "assumptions": [],
+            "risks": [],
+            "open_questions": [],
+            "recommended_actions": [],
+            "confidence_level": "medium",
+            "out_of_scope": False,
+            "refer_to_agent_id": None,
+        }
+
     def _synthesis(self, _: str | None) -> dict[str, Any]:
         return {
             "problem_statement": "Choosing one priority for the next 12 months.",

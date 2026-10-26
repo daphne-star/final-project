@@ -33,6 +33,17 @@ from app.orchestration.events import MeetingEventModel
 from app.orchestration.meeting import MeetingAborted, MeetingCancelled, MeetingLimits
 from app.services import meeting as svc
 
+
+def _force_utf8_stdout() -> None:
+    """The Windows console defaults to cp1252, which cannot encode the minus
+    signs, dashes, and quotes the model returns. Reconfigure rather than let a
+    successful run die while printing its own output."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors="replace")
+
+
 DEMO_EMAIL = "founder@northstarlabs.example.com"
 DEMO_SLUG = "northstar-labs-demo"
 
@@ -140,6 +151,7 @@ async def live_sink(event: MeetingEventModel) -> None:
 
 
 async def main() -> int:
+    _force_utf8_stdout()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--question", default=QUESTION)
     parser.add_argument("--rounds", type=int, default=1, help="Max debate rounds")

@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.agents.meeting_schemas import ActionItemOutput, DecisionBriefOutput
-from app.agents.registry import REGISTRY, AgentId
+from app.agents.registry import REGISTRY, AgentId, validate_agent_ids
 from app.db.session import AsyncSessionLocal
 from app.models.decision import ActionItem, DecisionPosition, StrategicDecision
 from app.models.enums import (
@@ -19,13 +19,16 @@ from app.models.enums import (
     DecisionStatus,
     MeetingMode,
     MeetingStatus,
+    ParticipantStatus,
 )
+from app.models.intervention import InterventionKind, MeetingIntervention
 from app.models.meeting import (
     AgentAssessment,
     AgentObjection,
     AgentRevision,
     Meeting,
     MeetingEvent,
+    MeetingParticipant,
 )
 from app.orchestration.events import EventSink, noop_sink
 from app.orchestration.meeting import (
@@ -34,7 +37,9 @@ from app.orchestration.meeting import (
     MeetingLimits,
     MeetingOrchestrator,
 )
+from app.orchestration.modes import profile_for
 from app.services.consultation import load_company_context
+from app.services.knowledge import capture_decision_memory
 
 logger = logging.getLogger(__name__)
 
@@ -54,16 +59,65 @@ async def create_meeting(
     question: str,
     title: str | None = None,
     mode: MeetingMode = MeetingMode.EXECUTIVE_MEETING,
+    participant_agent_ids: list[str] | None = None,
+    subject_decision_id: uuid.UUID | None = None,
 ) -> Meeting:
+    """Create a meeting, optionally with a user-chosen roster.
+
+    Chosen participants are written as MeetingParticipant rows up front. The
+    orchestrator treats existing rows as the candidate pool, so the user picks
+    who is in the room and the Chair picks who actually speaks to each item.
+    """
+    profile = profile_for(mode)
+    if profile.requires_subject and subject_decision_id is None:
+        raise MeetingError(
+            f"{profile.label} stress-tests an existing recommendation, so it "
+            "needs a decision to work on.",
+            code="subject_required",
+        )
+    if subject_decision_id is not None:
+        subject = await db.get(StrategicDecision, subject_decision_id)
+        if subject is None or subject.organization_id != organization_id:
+            raise MeetingError(
+                "That decision does not exist in this organization.",
+                code="subject_not_found",
+                status_code=404,
+            )
+
     meeting = Meeting(
         organization_id=organization_id,
         created_by_user_id=user_id,
         title=title or _derive_title(question),
         question=question,
         mode=mode,
+        subject_decision_id=subject_decision_id,
     )
     db.add(meeting)
     await db.flush()
+
+    if participant_agent_ids:
+        chosen = [
+            a
+            for a in validate_agent_ids(participant_agent_ids)
+            if a is not AgentId.CHAIRPERSON
+        ]
+        if not chosen:
+            raise MeetingError(
+                "None of the selected executives are on the roster.",
+                code="no_valid_participants",
+            )
+        for order, agent_id in enumerate(chosen, start=1):
+            db.add(
+                MeetingParticipant(
+                    meeting_id=meeting.id,
+                    agent_id=agent_id.value,
+                    selection_reason="Chosen by the user",
+                    speaking_order=order,
+                    status=ParticipantStatus.WAITING,
+                )
+            )
+        await db.flush()
+
     await db.refresh(meeting)
     return meeting
 
@@ -132,11 +186,14 @@ async def get_meeting_contributions(db: AsyncSession, meeting_id: uuid.UUID) -> 
         )
     ).scalar_one_or_none()
 
+    interventions = await list_interventions(db, meeting_id)
+
     return {
         "assessments": list(assessments),
         "objections": list(objections),
         "revisions": list(revisions),
         "decision": decision,
+        "interventions": interventions,
     }
 
 
@@ -159,6 +216,171 @@ async def list_events(
         .scalars()
         .all()
     )
+
+
+async def queue_intervention(
+    db: AsyncSession,
+    *,
+    meeting: Meeting,
+    user_id: uuid.UUID | None,
+    agent_id: str,
+    kind: InterventionKind,
+    prompt: str,
+    about_agent_id: str | None = None,
+) -> MeetingIntervention:
+    """Queue a founder instruction for one executive.
+
+    Validated against the roster and against who is actually in this meeting:
+    addressing an executive who is not present would queue something the
+    orchestrator could answer but that nobody in the room said.
+    """
+    if meeting.status not in (MeetingStatus.RUNNING, MeetingStatus.PAUSED):
+        raise MeetingError(
+            f"The meeting is {meeting.status.value}; interventions only apply "
+            "to a meeting in progress.",
+            code="meeting_not_live",
+            status_code=409,
+        )
+
+    try:
+        target = AgentId(agent_id)
+    except ValueError:
+        raise MeetingError(
+            f"No executive with id {agent_id!r}.", code="unknown_agent", status_code=404
+        ) from None
+
+    present = {p.agent_id for p in await _participants(db, meeting.id)}
+    if present and target.value not in present:
+        raise MeetingError(
+            f"{REGISTRY[target].display_name} is not in this meeting.",
+            code="agent_not_present",
+        )
+
+    about: str | None = None
+    if about_agent_id:
+        try:
+            about = AgentId(about_agent_id).value
+        except ValueError:
+            raise MeetingError(
+                f"No executive with id {about_agent_id!r}.",
+                code="unknown_agent",
+                status_code=404,
+            ) from None
+
+    intervention = MeetingIntervention(
+        meeting_id=meeting.id,
+        requested_by_user_id=user_id,
+        agent_id=target.value,
+        about_agent_id=about,
+        kind=kind,
+        prompt=prompt.strip(),
+    )
+    db.add(intervention)
+    await db.flush()
+    await db.refresh(intervention)
+    logger.info(
+        "Queued %s intervention for %s on meeting %s",
+        kind.value,
+        target.value,
+        meeting.id,
+    )
+    return intervention
+
+
+async def _participants(db: AsyncSession, meeting_id: uuid.UUID) -> list[MeetingParticipant]:
+    return list(
+        (
+            await db.execute(
+                select(MeetingParticipant).where(
+                    MeetingParticipant.meeting_id == meeting_id
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+
+async def list_interventions(
+    db: AsyncSession, meeting_id: uuid.UUID
+) -> list[MeetingIntervention]:
+    return list(
+        (
+            await db.execute(
+                select(MeetingIntervention)
+                .where(MeetingIntervention.meeting_id == meeting_id)
+                .order_by(MeetingIntervention.created_at)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+
+async def pause_meeting(db: AsyncSession, meeting: Meeting) -> Meeting:
+    """Ask the meeting to hold at its next checkpoint."""
+    if meeting.status is not MeetingStatus.RUNNING:
+        raise MeetingError(
+            f"Only a running meeting can be paused; this one is "
+            f"{meeting.status.value}.",
+            code="not_pausable",
+            status_code=409,
+        )
+    meeting.status = MeetingStatus.PAUSED
+    await db.flush()
+    return meeting
+
+
+async def resume_meeting(db: AsyncSession, meeting: Meeting) -> Meeting:
+    if meeting.status is not MeetingStatus.PAUSED:
+        raise MeetingError(
+            f"Only a paused meeting can be resumed; this one is "
+            f"{meeting.status.value}.",
+            code="not_resumable",
+            status_code=409,
+        )
+    meeting.status = MeetingStatus.RUNNING
+    await db.flush()
+    return meeting
+
+
+async def list_action_items(
+    db: AsyncSession, organization_id: uuid.UUID, *, open_only: bool = False
+) -> list[ActionItem]:
+    stmt = (
+        select(ActionItem)
+        .where(ActionItem.organization_id == organization_id)
+        .order_by(ActionItem.created_at.desc())
+    )
+    if open_only:
+        stmt = stmt.where(
+            ActionItem.status.in_(
+                [ActionItemStatus.OPEN, ActionItemStatus.IN_PROGRESS, ActionItemStatus.BLOCKED]
+            )
+        )
+    return list((await db.execute(stmt)).scalars().all())
+
+
+async def get_action_item(
+    db: AsyncSession, action_item_id: uuid.UUID, organization_id: uuid.UUID
+) -> ActionItem | None:
+    return (
+        await db.execute(
+            select(ActionItem).where(
+                ActionItem.id == action_item_id,
+                ActionItem.organization_id == organization_id,
+            )
+        )
+    ).scalar_one_or_none()
+
+
+async def update_action_item(db: AsyncSession, item: ActionItem, **fields) -> ActionItem:
+    for key, value in fields.items():
+        if hasattr(item, key):
+            setattr(item, key, value)
+    await db.flush()
+    await db.refresh(item)
+    return item
 
 
 async def cancel_meeting(db: AsyncSession, meeting: Meeting) -> Meeting:
@@ -193,6 +415,7 @@ async def run_meeting(
         )
 
     company = await load_company_context(db, meeting.organization_id)
+    preselected = await _preselected_candidates(db, meeting.id)
     orchestrator = MeetingOrchestrator(
         db,
         meeting,
@@ -201,10 +424,37 @@ async def run_meeting(
         model=model,
         sink=sink,
         user_id=user_id,
+        **({"candidates": preselected} if preselected else {}),
     )
 
     brief = await orchestrator.run()
     return await persist_decision(db, meeting, brief, orchestrator)
+
+
+async def _preselected_candidates(
+    db: AsyncSession, meeting_id: uuid.UUID
+) -> tuple[AgentId, ...]:
+    """Participant rows written before the meeting started, if any."""
+    rows = (
+        (
+            await db.execute(
+                select(MeetingParticipant)
+                .where(MeetingParticipant.meeting_id == meeting_id)
+                .order_by(MeetingParticipant.speaking_order)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    out: list[AgentId] = []
+    for row in rows:
+        try:
+            agent_id = AgentId(row.agent_id)
+        except ValueError:
+            continue
+        if agent_id is not AgentId.CHAIRPERSON:
+            out.append(agent_id)
+    return tuple(out)
 
 
 async def persist_decision(
@@ -261,6 +511,20 @@ async def persist_decision(
     ):
         for item in items:
             db.add(_action_item(meeting.organization_id, decision.id, item, window))
+
+    # The board having recommended something is itself a durable fact, but
+    # it is history, not a verified claim about the world — so it is recorded
+    # with its own provenance rather than as a company fact.
+    await capture_decision_memory(
+        db,
+        organization_id=meeting.organization_id,
+        meeting_id=meeting.id,
+        title=decision.title,
+        summary=(
+            f"Recommended '{brief.recommended_option_id}'. "
+            f"{brief.executive_summary}"
+        ),
+    )
 
     await db.flush()
     # Re-select with the collections eagerly loaded. A plain refresh() expires

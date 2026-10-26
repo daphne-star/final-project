@@ -23,10 +23,12 @@ from sqlalchemy.orm import selectinload
 
 from app.agents.deps import CompanyContext, GhostBoardDeps
 from app.agents.factory import build_bundle, get_bundle
+from app.agents.pricing import estimate_cost
 from app.agents.provider import ProviderNotConfigured
 from app.agents.registry import AgentId, get_definition
 from app.agents.schemas import ConsultationResponse
 from app.core.config import settings
+from app.mcp.context import ToolContext, bind_context
 from app.models.consultation import Consultation, ConsultationMessage
 from app.models.identity import CompanyProfile
 from app.models.usage import LLMUsageRecord
@@ -210,12 +212,22 @@ async def send_message(
 
     started = time.perf_counter()
     try:
-        result = await bundle.consultation_agent.run(
-            content,
-            deps=deps,
-            message_history=history,
-            timeout=float(settings.model_timeout_seconds),
-        )
+        with bind_context(
+            ToolContext(
+                organization_id=consultation.organization_id,
+                agent_id=agent_id,
+                allowed_scopes=frozenset(definition.tool_scopes),
+                user_id=user_id,
+                consultation_id=consultation.id,
+            )
+        ):
+            async with bundle.consultation_agent:
+                result = await bundle.consultation_agent.run(
+                    content,
+                    deps=deps,
+                    message_history=history,
+                    timeout=float(settings.model_timeout_seconds),
+                )
     except ProviderNotConfigured as exc:
         raise ConsultationError(str(exc), code="provider_not_configured", status_code=503) from exc
     except UsageLimitExceeded as exc:
@@ -268,7 +280,9 @@ async def send_message(
             input_tokens=usage.input_tokens,
             output_tokens=usage.output_tokens,
             total_tokens=usage.input_tokens + usage.output_tokens,
-            estimated_cost_usd=_cost_of(usage),
+            estimated_cost_usd=_cost_of(
+                usage, getattr(bundle.consultation_agent.model, "model_name", "unknown")
+            ),
             duration_ms=duration_ms,
         )
     )
@@ -292,19 +306,14 @@ def _as_jsonable(result: object) -> list:
     return json.loads(result.new_messages_json())  # type: ignore[attr-defined]
 
 
-def _cost_of(usage: object) -> float:
-    """Provider cost when Pydantic AI could compute it, else 0.0.
+def _cost_of(usage: object, model_name: str) -> float:
+    """Provider cost, or 0.0 when no price is configured for this model.
 
-    Reported as 0.0 rather than an invented estimate when pricing for the
-    configured model is unknown to the library.
+    Previously this tried to read a cost off the usage object and always got
+    nothing, so every row said 0.00 and nobody could tell that apart from a
+    free call. Now the price table decides, and an unpriced model records 0.0
+    with `pricing_is_configured()` available to say why.
     """
-    cost = getattr(usage, "cost", None)
-    if cost is None:
-        return 0.0
-    try:
-        return float(cost.total_price)  # type: ignore[attr-defined]
-    except Exception:  # noqa: BLE001
-        try:
-            return float(cost)
-        except Exception:  # noqa: BLE001
-            return 0.0
+    inp = getattr(usage, "input_tokens", 0) or 0
+    out = getattr(usage, "output_tokens", 0) or 0
+    return estimate_cost(model_name, inp, out) or 0.0

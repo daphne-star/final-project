@@ -5,16 +5,16 @@ from __future__ import annotations
 import asyncio
 from logging.config import fileConfig
 
-from alembic import context
 from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
+from alembic import context
 from app.core.config import settings
 
-# Importing the models package registers every table on Base.metadata.
-from app.models import Base  # noqa: F401
-import app.models  # noqa: F401, E402
+# Importing the models package runs its __init__, which registers every
+# table on Base.metadata. A separate `import app.models` was redundant.
+from app.models import Base
 
 config = context.config
 config.set_main_option("sqlalchemy.url", str(settings.database_url))

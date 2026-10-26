@@ -35,6 +35,9 @@ export function Dashboard() {
           {executives.map((exec) => {
             const Portrait = EXECUTIVE_PORTRAITS[exec.avatar_ref]
             return (
+              // The portrait SVG carries its own role="img" and label, so
+              // the wrapper stays a plain box: nesting a second image here
+              // makes a screen reader read every executive twice.
               <div
                 key={exec.agent_id}
                 className="relative h-28 w-21 shrink-0 overflow-hidden rounded-lg border border-line"
@@ -76,9 +79,8 @@ export function Dashboard() {
           step="3"
           title="Convene a meeting"
           body="Bring a real decision. The Chair sets an agenda, the executives assess it independently, then they debate."
-          to="/board"
-          cta="Coming in Phase 4"
-          disabled
+          to="/meetings/new"
+          cta="Convene the board"
         />
       </section>
     </div>
@@ -111,7 +113,7 @@ function OnboardingCard({
           </span>
           <span className="text-xs font-semibold text-ink-faint">Step {step}</span>
         </div>
-        <CardTitle>{title}</CardTitle>
+        <CardTitle as="h2">{title}</CardTitle>
         <CardDescription className="leading-relaxed">{body}</CardDescription>
       </CardHeader>
       <CardContent className="mt-auto">

@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 
 from pydantic_ai import Agent, RunContext
+from pydantic_ai.mcp import MCPToolset
 from pydantic_ai.models import Model
 
 from app.agents.deps import GhostBoardDeps
@@ -27,6 +28,7 @@ from app.agents.prompts import ONE_ON_ONE_SUFFIX, SHARED_RULES, role_instruction
 from app.agents.provider import build_model, default_model_settings
 from app.agents.registry import REGISTRY, AgentId, ExecutiveDefinition
 from app.agents.schemas import AgentAssessmentOutput, ConsultationResponse
+from app.mcp.server import get_mcp_server, tools_for_scopes
 
 logger = logging.getLogger(__name__)
 
@@ -63,12 +65,29 @@ def _roster_block() -> str:
     return "\n".join(lines)
 
 
+def _toolset_for(definition: ExecutiveDefinition) -> MCPToolset | None:
+    """An MCP toolset exposing only the tools this executive is allowed.
+
+    Filtering is defence in depth, not the security boundary: the server
+    re-checks the scope on every call, so an agent that somehow asked for a
+    tool outside its remit gets a denial recorded rather than a result. What
+    filtering buys is a smaller, more relevant tool list in the prompt.
+    """
+    allowed = tools_for_scopes(tuple(definition.tool_scopes))
+    if not allowed:
+        return None
+
+    toolset = MCPToolset(get_mcp_server(), id=f"ghostboard-{definition.agent_id.value}")
+    return toolset.filtered(lambda _ctx, tool_def: tool_def.name in allowed)
+
+
 def _build_agent[OutputT](
     definition: ExecutiveDefinition,
     output_type: type[OutputT],
     extra_instructions: str,
     model: Model | None = None,
     max_tokens: int | None = None,
+    with_tools: bool = True,
 ) -> Agent[GhostBoardDeps, OutputT]:
     static_instructions = "\n\n".join(
         [
@@ -80,12 +99,15 @@ def _build_agent[OutputT](
         ]
     )
 
+    toolset = _toolset_for(definition) if with_tools else None
+
     agent: Agent[GhostBoardDeps, OutputT] = Agent(
         model or build_model(),
         output_type=output_type,
         deps_type=GhostBoardDeps,
         instructions=static_instructions,
         model_settings=default_model_settings(max_tokens=max_tokens),
+        toolsets=[toolset] if toolset else [],
         name=f"ghostboard-{definition.agent_id.value}",
         # Bounded retries: a response that will not validate twice is a real
         # failure and should surface, not loop.
@@ -107,10 +129,17 @@ def _build_agent[OutputT](
                 ctx.deps.agent_id,
                 definition.agent_id,
             )
+        if not with_tools:
+            return (
+                "You have no tools in this session. If answering well needs "
+                "information you do not have, say what is missing rather than "
+                "filling the gap."
+            )
         return (
-            "You have no external research tools in this session. If answering "
-            "well needs information you do not have, say what is missing rather "
-            "than filling the gap."
+            "You have tools available. Use them rather than estimating: a figure "
+            "you computed with a tool is checkable, one you produced in your head "
+            "is not. You still have no external web research tool, so anything "
+            "outside the company's own data remains unknown to you."
         )
 
     return agent

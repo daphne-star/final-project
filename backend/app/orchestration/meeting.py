@@ -20,14 +20,16 @@ import asyncio
 import logging
 import time
 import uuid
-from dataclasses import dataclass, field
+from collections.abc import Iterable
+from contextlib import AsyncExitStack
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any
 
 from pydantic import BaseModel
 from pydantic_ai import Agent
 from pydantic_ai.models import Model
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.deps import CompanyContext, GhostBoardDeps
@@ -40,14 +42,19 @@ from app.agents.meeting_schemas import (
     ObjectionOutput,
     RevisionOutput,
 )
+from app.agents.pricing import estimate_cost
 from app.agents.registry import REGISTRY, AgentId, validate_agent_ids
 from app.agents.schemas import AgentAssessmentOutput
 from app.core.config import settings
+from app.mcp.context import ToolContext, bind_context
+from app.models.decision import StrategicDecision
 from app.models.enums import (
+    MeetingMode,
     MeetingStage,
     MeetingStatus,
     ParticipantStatus,
 )
+from app.models.intervention import InterventionStatus, MeetingIntervention
 from app.models.meeting import (
     AgentAssessment,
     AgentObjection,
@@ -58,6 +65,9 @@ from app.models.meeting import (
 )
 from app.models.usage import LLMUsageRecord
 from app.orchestration.events import EventSink, EventType, MeetingEventModel, noop_sink
+from app.orchestration.interventions import build_prompt as build_intervention_prompt
+from app.orchestration.modes import ROADMAP_TASK, profile_for
+from app.services.knowledge import build_meeting_context
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +95,47 @@ class MeetingAborted(Exception):
         self.code = code
 
 
+# An agent failure reaches the user twice: as an agent_failed event in the
+# transcript, and — when the Chair is the one that failed — as the meeting's
+# failure_reason, which also lands in the exported brief. A raw provider
+# exception there is both unreadable and unbounded, so it gets summarised.
+# The full exception, with its traceback, stays in the server log.
+_ERROR_HINTS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (
+        ("401", "403", "unauthorized", "authentication", "invalid_api_key", "api key"),
+        "the model provider rejected this deployment's credentials",
+    ),
+    (
+        ("429", "rate limit", "rate_limit", "quota"),
+        "the model provider is rate-limiting this workspace",
+    ),
+    (
+        ("timeout", "timed out"),
+        "the model did not answer within the time limit",
+    ),
+    (
+        ("content_filter", "content filter", "content_policy"),
+        "the model provider refused to answer this prompt",
+    ),
+    (
+        ("connection", "connect call failed", "name or service not known"),
+        "the model provider could not be reached",
+    ),
+)
+
+
+def summarize_agent_error(exc: BaseException) -> str:
+    """One sentence a founder can act on, bounded in length."""
+    name = type(exc).__name__
+    text = str(exc).strip()
+    lowered = f"{name} {text}".lower()
+    for needles, hint in _ERROR_HINTS:
+        if any(needle in lowered for needle in needles):
+            return f"{hint} ({name})"
+    first_line = text.splitlines()[0] if text else ""
+    return (f"{name}: {first_line}" if first_line else name)[:200]
+
+
 @dataclass(slots=True)
 class MeetingLimits:
     """Bounded execution. Defaults come from settings; tests shrink them."""
@@ -92,15 +143,23 @@ class MeetingLimits:
     max_debate_rounds: int = 1
     max_challenges_per_round: int = 4
     max_model_requests: int = 60
+    max_total_tokens: int = 400_000
     model_timeout_seconds: float = 120.0
     max_assessment_concurrency: int = 4
     cost_limit_usd: float = 5.0
+    #: How many founder interruptions to answer at one checkpoint. A cap
+    #: keeps one impatient user from stalling the meeting indefinitely.
+    max_interventions_per_checkpoint: int = 3
+    pause_poll_seconds: float = 1.0
+    #: A paused meeting still holds a worker, so it cannot park forever.
+    max_pause_seconds: float = 30 * 60
 
     @classmethod
     def from_settings(cls) -> MeetingLimits:
         return cls(
             max_debate_rounds=settings.max_debate_rounds,
             max_model_requests=settings.max_model_requests_per_meeting,
+            max_total_tokens=settings.max_total_tokens_per_meeting,
             model_timeout_seconds=float(settings.model_timeout_seconds),
             cost_limit_usd=settings.meeting_cost_limit_usd,
         )
@@ -115,10 +174,31 @@ class Budget:
     input_tokens: int = 0
     output_tokens: int = 0
     estimated_cost_usd: float = 0.0
+    #: False while no model in this meeting has a configured price, so a
+    #: 0.00 total is not mistaken for "this meeting was free".
+    cost_known: bool = False
     failures: list[str] = field(default_factory=list)
 
+    #: True once any ceiling is hit. Cost only participates when a price is
+    #: configured; tokens always do.
+    def exceeded_reason(self) -> str | None:
+        if self.model_requests >= self.limits.max_model_requests:
+            return (
+                f"model request ceiling "
+                f"({self.model_requests}/{self.limits.max_model_requests})"
+            )
+        total_tokens = self.input_tokens + self.output_tokens
+        if total_tokens >= self.limits.max_total_tokens:
+            return f"token ceiling ({total_tokens:,}/{self.limits.max_total_tokens:,})"
+        if self.cost_known and self.estimated_cost_usd >= self.limits.cost_limit_usd:
+            return (
+                f"cost ceiling (${self.estimated_cost_usd:.2f}/"
+                f"${self.limits.cost_limit_usd:.2f})"
+            )
+        return None
+
     def would_exceed(self) -> bool:
-        return self.model_requests >= self.limits.max_model_requests
+        return self.exceeded_reason() is not None
 
     def record(self, usage: Any) -> None:
         self.model_requests += getattr(usage, "requests", 1) or 1
@@ -157,21 +237,44 @@ class MeetingOrchestrator:
         model: Model | None = None,
         sink: EventSink = noop_sink,
         user_id: uuid.UUID | None = None,
-        candidates: tuple[AgentId, ...] = DEFAULT_PARTICIPANTS,
+        candidates: tuple[AgentId, ...] | None = None,
     ) -> None:
         self.db = db
         self.meeting = meeting
         self.company = company
-        self.limits = limits or MeetingLimits.from_settings()
+        self.profile = profile_for(meeting.mode)
         self.model = model
         self.sink = sink
         self.user_id = user_id
+
+        # A bigger room costs more calls, so the ceiling scales with the mode
+        # rather than every mode inheriting an Executive Meeting's budget.
+        base = limits or MeetingLimits.from_settings()
+        self.limits = replace(
+            base,
+            max_model_requests=max(base.max_model_requests, self.profile.model_request_budget)
+            if limits is None
+            else base.max_model_requests,
+            max_challenges_per_round=(
+                self.profile.max_challenges if limits is None else base.max_challenges_per_round
+            ),
+        )
         self.budget = Budget(limits=self.limits)
         self._sequence = 0
-        # The Chair chooses from this pool, not the whole roster. Keeping
-        # it explicit is what makes the call count predictable: an
-        # Executive Meeting is four assessments, not nine.
-        self.candidates = tuple(a for a in candidates if a is not AgentId.CHAIRPERSON)
+
+        # The Chair chooses from this pool, not the whole roster. An explicit
+        # pool (the user picked attendees) wins over the mode default.
+        pool = candidates if candidates is not None else self.profile.candidates
+        self.candidates = tuple(a for a in pool if a is not AgentId.CHAIRPERSON)
+
+        #: Set in Stage 1 for modes that stress-test an existing decision.
+        self.subject: StrategicDecision | None = None
+        #: Retrieved once per meeting and reused, so eight concurrent
+        #: assessments do not each run the same search.
+        self.knowledge_block: str = ""
+        #: Agent toolsets are entered once per meeting and closed with it.
+        self._stack = AsyncExitStack()
+        self._entered: set[int] = set()
 
         # A test-supplied model needs freshly built agents; the cached ones are
         # already bound to the configured provider.
@@ -202,8 +305,17 @@ class MeetingOrchestrator:
     async def _emit(
         self, event_type: EventType, *, agent_id: AgentId | str | None = None, **payload: Any
     ) -> None:
-        """Persist an event, then hand it to the sink. Order matters: a listener
-        must never see something the database does not have."""
+        """Commit an event, then hand it to the sink.
+
+        Order matters: a listener must never see something the database does
+        not have. It must be a *commit* and not a flush, because the SSE
+        stream reads through its own sessions — an uncommitted event is
+        invisible to it, and the meeting would appear frozen until the whole
+        workflow finished.
+
+        This also means a crashed meeting keeps everything it produced up to
+        the failure, rather than rolling the transcript back.
+        """
         self._sequence += 1
         event = MeetingEventModel(
             meeting_id=self.meeting.id,
@@ -223,20 +335,178 @@ class MeetingOrchestrator:
                 timestamp=event.timestamp,
             )
         )
-        await self.db.flush()
+        await self.db.commit()
         await self.sink(event)
 
     async def _checkpoint(self) -> None:
-        """Cancellation and budget check, between stages and before each wave."""
+        """A safe point between stages: cancel, pause, interventions, budget.
+
+        This is where the founder's control over a running meeting actually
+        lands. Everything here happens *between* units of work, never in the
+        middle of one, so an intervention cannot corrupt a round in flight.
+        """
         await self.db.refresh(self.meeting, ["status"])
         if self.meeting.status is MeetingStatus.CANCELLED:
             raise MeetingCancelled
+
+        await self._await_resume()
+        await self._drain_interventions()
+
         if self.budget.would_exceed():
+            reason = self.budget.exceeded_reason()
             raise MeetingAborted(
-                f"Meeting hit its model request ceiling "
-                f"({self.budget.model_requests}/{self.limits.max_model_requests}).",
-                code="model_request_limit",
+                f"Meeting hit its {reason}.", code="usage_limit"
             )
+
+    async def _await_resume(self) -> None:
+        """Hold at this checkpoint while the meeting is paused.
+
+        Pausing stops the *next* step; it does not abort a provider request
+        already in flight, and the spec is explicit that we must not claim
+        otherwise. A paused meeting is a task parked at a checkpoint, which
+        is why it still consumes a worker slot.
+        """
+        if self.meeting.status is not MeetingStatus.PAUSED:
+            return
+
+        await self._emit(EventType.MEETING_PAUSED, stage=self.meeting.stage.value)
+        waited = 0.0
+        while self.meeting.status is MeetingStatus.PAUSED:
+            if waited >= self.limits.max_pause_seconds:
+                raise MeetingAborted(
+                    f"Meeting stayed paused for more than "
+                    f"{self.limits.max_pause_seconds / 60:.0f} minutes.",
+                    code="pause_timeout",
+                )
+            await asyncio.sleep(self.limits.pause_poll_seconds)
+            waited += self.limits.pause_poll_seconds
+            await self.db.refresh(self.meeting, ["status"])
+            if self.meeting.status is MeetingStatus.CANCELLED:
+                raise MeetingCancelled
+            # Answer anything the founder queued while it was paused.
+            await self._drain_interventions()
+
+        await self._emit(EventType.MEETING_RESUMED, stage=self.meeting.stage.value)
+
+    async def _drain_interventions(self) -> int:
+        """Answer every queued intervention, oldest first."""
+        queued = (
+            (
+                await self.db.execute(
+                    select(MeetingIntervention)
+                    .where(
+                        MeetingIntervention.meeting_id == self.meeting.id,
+                        MeetingIntervention.status == InterventionStatus.QUEUED,
+                    )
+                    .order_by(MeetingIntervention.created_at)
+                    .limit(self.limits.max_interventions_per_checkpoint)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for intervention in queued:
+            await self._run_intervention(intervention)
+        return len(queued)
+
+    async def _run_intervention(self, intervention: MeetingIntervention) -> None:
+        """Put one founder instruction to one executive, and keep the answer."""
+        try:
+            agent_id = AgentId(intervention.agent_id)
+        except ValueError:
+            intervention.status = InterventionStatus.FAILED
+            intervention.error_message = f"Unknown agent {intervention.agent_id!r}"
+            await self.db.flush()
+            return
+
+        about_id: AgentId | None = None
+        if intervention.about_agent_id:
+            try:
+                about_id = AgentId(intervention.about_agent_id)
+            except ValueError:
+                about_id = None
+
+        intervention.status = InterventionStatus.RUNNING
+        await self.db.flush()
+        await self._emit(
+            EventType.USER_INTERVENTION_REQUESTED,
+            agent_id=agent_id,
+            intervention_id=str(intervention.id),
+            kind=intervention.kind.value,
+            prompt=intervention.prompt,
+            about_agent_id=intervention.about_agent_id,
+        )
+        await self._set_participant_status(agent_id, ParticipantStatus.SPEAKING)
+
+        own = self.assessments.get(agent_id)
+        revision = self.revisions.get(agent_id)
+        own_position = (
+            revision.updated_position
+            if revision
+            else (own.recommended_position if own else None)
+        )
+        target = self.assessments.get(about_id) if about_id else None
+
+        prompt = build_intervention_prompt(
+            kind=intervention.kind,
+            agent_id=agent_id,
+            founder_text=intervention.prompt,
+            about_agent_id=about_id,
+            meeting_question=self.meeting.question,
+            own_position=own_position,
+            target_position=target.recommended_position if target else None,
+            stage=self.meeting.stage.value,
+        )
+
+        outcome = await self._run_agent(
+            self._bundle(agent_id).consultation_agent,
+            agent_id,
+            prompt,
+            stage="intervention",
+        )
+        await self._set_participant_status(agent_id, ParticipantStatus.COMPLETED)
+
+        if not outcome.ok or outcome.output is None:
+            intervention.status = InterventionStatus.FAILED
+            intervention.error_message = outcome.error
+            intervention.duration_ms = outcome.duration_ms
+            await self.db.flush()
+            return
+
+        answer = outcome.output
+        intervention.status = InterventionStatus.ANSWERED
+        intervention.response = answer.answer
+        intervention.structured_response = answer.model_dump(mode="json")
+        intervention.answered_at = datetime.now(UTC)
+        intervention.answered_at_stage = self.meeting.stage.value
+        intervention.duration_ms = outcome.duration_ms
+        await self.db.flush()
+
+        await self._emit(
+            EventType.INTERVENTION_ANSWERED,
+            agent_id=agent_id,
+            intervention_id=str(intervention.id),
+            kind=intervention.kind.value,
+            answer=answer.answer,
+            confidence_level=answer.confidence_level.value,
+        )
+
+    async def _abandon_open_interventions(self) -> None:
+        """Nothing queued should look pending once the meeting is over."""
+        await self.db.execute(
+            update(MeetingIntervention)
+            .where(
+                MeetingIntervention.meeting_id == self.meeting.id,
+                MeetingIntervention.status.in_(
+                    [InterventionStatus.QUEUED, InterventionStatus.RUNNING]
+                ),
+            )
+            .values(
+                status=InterventionStatus.ABANDONED,
+                error_message="The meeting ended before this could be answered.",
+            )
+        )
+        await self.db.flush()
 
     async def _set_stage(self, stage: MeetingStage) -> None:
         self.meeting.stage = stage
@@ -279,19 +549,44 @@ class MeetingOrchestrator:
         """
         started = time.perf_counter()
         model_name = getattr(agent.model, "model_name", "unknown")
+        deps = self._deps(agent_id)
+        await self._ensure_entered(agent)
+        definition = REGISTRY[agent_id]
         try:
-            result = await agent.run(
-                prompt, deps=self._deps(agent_id), timeout=self.limits.model_timeout_seconds
-            )
+            # Bind the authorized scope for the duration of the run. MCP tools
+            # read the organization from here, never from a model argument.
+            with bind_context(
+                ToolContext(
+                    organization_id=self.meeting.organization_id,
+                    agent_id=agent_id,
+                    allowed_scopes=frozenset(definition.tool_scopes),
+                    user_id=self.user_id,
+                    meeting_id=self.meeting.id,
+                )
+            ):
+                # The agent's MCP toolset is entered once for the meeting (see
+                # _enter_agents), not per call: connecting costs ~27ms, which
+                # over a ten-call meeting is a quarter-second of pure setup.
+                result = await agent.run(
+                    prompt, deps=deps, timeout=self.limits.model_timeout_seconds
+                )
         # Deliberately broad. Any failure of one agent — a provider error, an
         # unparseable response, a timeout, or a bug in a tool — is one
         # executive missing from the room, not a reason to restart the
         # meeting. asyncio.CancelledError is a BaseException and still
         # propagates, so real cancellation is unaffected.
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             duration = int((time.perf_counter() - started) * 1000)
-            message = f"{type(exc).__name__}: {exc}"
-            logger.warning("Agent %s failed during %s: %s", agent_id.value, stage, message)
+            message = summarize_agent_error(exc)
+            # exc_info keeps the provider's full response and the traceback in
+            # the log; only the summary above is ever shown to the user.
+            logger.warning(
+                "Agent %s failed during %s: %s",
+                agent_id.value,
+                stage,
+                message,
+                exc_info=True,
+            )
             return AgentRunOutcome(
                 agent_id=agent_id,
                 error=message,
@@ -315,6 +610,10 @@ class MeetingOrchestrator:
             self.budget.record(outcome.usage)
             inp = getattr(outcome.usage, "input_tokens", 0) or 0
             out = getattr(outcome.usage, "output_tokens", 0) or 0
+            cost = estimate_cost(outcome.model_name, inp, out)
+            if cost is not None:
+                self.budget.estimated_cost_usd += cost
+                self.budget.cost_known = True
             self.db.add(
                 LLMUsageRecord(
                     organization_id=self.meeting.organization_id,
@@ -326,6 +625,7 @@ class MeetingOrchestrator:
                     input_tokens=inp,
                     output_tokens=out,
                     total_tokens=inp + out,
+                    estimated_cost_usd=cost or 0.0,
                     duration_ms=outcome.duration_ms,
                 )
             )
@@ -365,6 +665,88 @@ class MeetingOrchestrator:
         await self._record_outcome(outcome)
         return outcome
 
+    async def _load_subject(self) -> None:
+        """Load the decision a stress-test meeting is working on."""
+        if not self.profile.requires_subject:
+            return
+        if self.meeting.subject_decision_id is None:
+            raise MeetingAborted(
+                f"{self.profile.label} needs an existing decision to stress-test, "
+                "but none was supplied.",
+                code="subject_required",
+            )
+        subject = await self.db.get(StrategicDecision, self.meeting.subject_decision_id)
+        if subject is None or subject.organization_id != self.meeting.organization_id:
+            raise MeetingAborted(
+                "The decision this meeting was asked to stress-test is not available.",
+                code="subject_not_found",
+            )
+        self.subject = subject
+
+    def _subject_block(self) -> str:
+        """The recommendation under test, rendered for every stage prompt.
+
+        Devil's Advocate works on a decision the board already took, so every
+        stage needs the actual recommendation in front of it — including the
+        dissent already recorded, so nobody re-raises a point the board has
+        heard and answered.
+        """
+        if self.subject is None:
+            return ""
+
+        options = "\n".join(
+            f"  - [{o.get('option_id')}] {o.get('title')}: "
+            f"{str(o.get('description', ''))[:200]}"
+            for o in (self.subject.strategic_options or [])
+        )
+        dissent = (
+            "\n".join(
+                f"  - {d.get('agent_id')}: {str(d.get('position', ''))[:200]}"
+                for d in (self.subject.dissenting_opinions or [])
+            )
+            or "  (none recorded)"
+        )
+
+        return "\n".join(
+            [
+                "",
+                "=== THE RECOMMENDATION UNDER TEST ===",
+                f"Title: {self.subject.title}",
+                f"Problem it addresses: {self.subject.problem_statement}",
+                f"Summary: {self.subject.executive_summary}",
+                f"Recommended option: {self.subject.recommended_option_id}",
+                f"Rationale: {self.subject.recommendation_rationale or '(none given)'}",
+                "Options it considered:",
+                options,
+                "Dissent already on record:",
+                dissent,
+                "=== END ===",
+                "",
+            ]
+        )
+
+    async def _ensure_entered(self, agent: Agent[Any, Any]) -> None:
+        """Open this agent's MCP toolset once, for the rest of the meeting.
+
+        Lazy rather than eager: entering every agent of every participant up
+        front costs more connections than the meeting actually uses, and a
+        full board only ever calls four of the nine agents it seats.
+
+        Safe only on the serial path. AsyncExitStack cannot be pushed onto
+        from several tasks at once, so the concurrent assessment wave is
+        pre-entered by its caller before fanning out.
+        """
+        key = id(agent)
+        if key in self._entered:
+            return
+        await self._stack.enter_async_context(agent)
+        self._entered.add(key)
+
+    async def _enter_assessment_agents(self, agent_ids: Iterable[AgentId]) -> None:
+        """Pre-enter the agents the concurrent wave is about to use."""
+        for agent_id in agent_ids:
+            await self._ensure_entered(self._bundle(agent_id).assessment_agent)
+
     # -- stages ------------------------------------------------------------
 
     async def _stage_agenda(self) -> list[AgentId]:
@@ -373,15 +755,23 @@ class MeetingOrchestrator:
         await self._emit(EventType.AGENT_STARTED, agent_id=AgentId.CHAIRPERSON, stage="agenda")
 
         roster_lines = "\n".join(
-            f"- {d.agent_id.value}: {d.title} — {d.expertise_descriptor}"
-            for d in REGISTRY.values()
-            if not d.can_chair
+            f"- {REGISTRY[a].agent_id.value}: {REGISTRY[a].title} — "
+            f"{REGISTRY[a].expertise_descriptor}"
+            # Only the mode's pool: the Chair cannot seat an executive this
+            # meeting type does not include.
+            for a in self.candidates
         )
         prompt = (
-            f"The founder asks:\n\n{self.meeting.question}\n\n"
-            f"Executives available:\n{roster_lines}\n\n"
+            f"Meeting type: {self.profile.label}.\n"
+            f"{self.profile.agenda_task}\n\n"
+            f"The founder asks:\n\n{self.meeting.question}\n"
+            f"{self._subject_block()}\n"
+            f"{self.knowledge_block}\n"
+            f"Executives available for this meeting:\n{roster_lines}\n\n"
             "Frame the meeting: restate the real question, set the agenda, and "
-            "choose who should contribute."
+            "choose who should contribute. You may only choose from the list "
+            "above; no other executive is available today. Seat between "
+            f"{self.profile.min_participants} and {self.profile.max_participants}."
         )
 
         outcome = await self._run_agent(
@@ -408,6 +798,33 @@ class MeetingOrchestrator:
         if not selected:
             logger.warning("Chair selected no valid participants; falling back to the pool")
             selected = list(self.candidates)
+
+        # A full board means everyone; otherwise honour the mode's bounds.
+        if self.meeting.mode is MeetingMode.FULL_BOARD:
+            selected = list(self.candidates)
+        elif len(selected) < min(self.profile.min_participants, len(self.candidates)):
+            # The Chair under-seated. The mode's minimum is a product promise
+            # (a stress test with two attackers is not much of one), so top up
+            # from the pool rather than letting the field be decorative.
+            wanted = min(self.profile.min_participants, len(self.candidates))
+            for agent_id in self.candidates:
+                if len(selected) >= wanted:
+                    break
+                if agent_id not in selected:
+                    selected.append(agent_id)
+            logger.info(
+                "Chair seated fewer than the %s minimum; topped up to %d",
+                self.profile.label,
+                len(selected),
+            )
+        if len(selected) > self.profile.max_participants:
+            logger.info(
+                "Chair seated %d; trimming to the %s maximum of %d",
+                len(selected),
+                self.profile.label,
+                self.profile.max_participants,
+            )
+            selected = selected[: self.profile.max_participants]
 
         self.meeting.agenda = agenda.model_dump(mode="json")
         await self._persist_participants(selected, agenda)
@@ -471,10 +888,13 @@ class MeetingOrchestrator:
             )
 
         prompt = (
+            f"Meeting type: {self.profile.label}.\n\n"
             f"The board is deciding:\n\n{question}\n\n"
-            f"The founder originally asked:\n{self.meeting.question}\n\n"
+            f"The founder originally asked:\n{self.meeting.question}\n"
+            f"{self._subject_block()}\n"
+            f"{self.knowledge_block}\n"
             + (f"Agenda:\n{agenda_block}\n\n" if agenda_block else "")
-            + "Give your independent assessment."
+            + self.profile.assessment_task
         )
 
         # Announce everyone first, serially, then fan out. The agent calls
@@ -482,6 +902,10 @@ class MeetingOrchestrator:
         for agent_id in participants:
             await self._set_participant_status(agent_id, ParticipantStatus.SPEAKING)
             await self._emit(EventType.AGENT_STARTED, agent_id=agent_id, stage="assessment")
+
+        # Entered before the fan-out: _ensure_entered is not safe to call
+        # from several tasks at once.
+        await self._enter_assessment_agents(participants)
 
         semaphore = asyncio.Semaphore(self.limits.max_assessment_concurrency)
 
@@ -517,10 +941,11 @@ class MeetingOrchestrator:
                 confidence_level=assessment.confidence_level.value,
             )
 
-        if len(self.assessments) < MIN_ASSESSMENTS:
+        minimum = self.profile.min_assessments
+        if len(self.assessments) < minimum:
             raise MeetingAborted(
                 f"Only {len(self.assessments)} executive(s) completed an assessment; "
-                f"at least {MIN_ASSESSMENTS} are needed for a board discussion.",
+                f"{minimum} are needed for a {self.profile.label}.",
                 code="insufficient_assessments",
             )
 
@@ -577,6 +1002,7 @@ class MeetingOrchestrator:
             f"Independent assessments:\n\n{self._positions_block()}\n\n"
             "Identify the genuine conflicts and assign challenges. If they "
             "substantially agree, return no assignments."
+            + (f"\n\n{self.profile.debate_task}" if self.profile.debate_task else "")
         )
         plan_outcome = await self._run_agent(
             self._chair.debate_agent, AgentId.CHAIRPERSON, prompt, stage="debate_plan"
@@ -777,8 +1203,10 @@ class MeetingOrchestrator:
             f"{self.agenda.reframed_question if self.agenda else '(no reframing)'}\n\n"
             f"=== Independent assessments ===\n\n{self._positions_block()}\n\n"
             f"=== Objections raised in debate ===\n\n{objection_block}\n\n"
-            f"=== Revisions after debate ===\n\n{revision_block}\n\n"
+            f"=== Revisions after debate ===\n\n{revision_block}\n"
+            f"{self._subject_block()}\n"
             "Write the decision brief."
+            + (f"\n\n{self.profile.synthesis_task}" if self.profile.synthesis_task else "")
         )
 
         outcome = await self._run_agent(
@@ -800,10 +1228,85 @@ class MeetingOrchestrator:
         )
         return brief
 
+    async def _stage_roadmap(self, brief: DecisionBriefOutput) -> DecisionBriefOutput:
+        """Strategy Workshop only: the COO turns the decision into a real plan.
+
+        Returns the brief with its action plan replaced. If the COO is not in
+        the room or the call fails, the Chair's plan stands — a workshop
+        without a detailed roadmap is diminished, not broken.
+        """
+        if AgentId.COO not in self.assessments:
+            logger.info("No COO in this workshop; keeping the Chair's action plan")
+            return brief
+
+        await self._emit(
+            EventType.AGENT_STARTED, agent_id=AgentId.COO, stage="roadmap"
+        )
+        await self._set_participant_status(AgentId.COO, ParticipantStatus.SPEAKING)
+
+        chosen = next(
+            (
+                o
+                for o in brief.strategic_options
+                if o.option_id == brief.recommended_option_id
+            ),
+            None,
+        )
+        dependencies = (
+            ", ".join(chosen.dependencies) if chosen and chosen.dependencies else "none stated"
+        )
+        risks = ", ".join(chosen.risks) if chosen and chosen.risks else "none stated"
+        prompt = "\n".join(
+            [
+                (
+                    "The board recommends: "
+                    f"{chosen.title if chosen else brief.recommended_option_id}"
+                ),
+                chosen.description if chosen else "",
+                "",
+                f"Why: {brief.recommendation_rationale}",
+                "",
+                f"Dependencies the board named: {dependencies}",
+                f"Risks the board named: {risks}",
+                "",
+                ROADMAP_TASK,
+            ]
+        )
+
+        outcome = await self._run_agent(
+            self._bundle(AgentId.COO).assessment_agent,
+            AgentId.COO,
+            prompt,
+            stage="roadmap",
+        )
+        await self._set_participant_status(AgentId.COO, ParticipantStatus.COMPLETED)
+
+        if not outcome.ok or outcome.output is None:
+            return brief
+
+        plan = outcome.output
+        await self._persist_assessment(AgentId.COO, plan, round_number=99)
+        await self._emit(
+            EventType.AGENT_MESSAGE_COMPLETED,
+            agent_id=AgentId.COO,
+            stage="roadmap",
+            summary=plan.summary,
+            recommended_position=plan.recommended_position,
+            confidence_level=plan.confidence_level.value,
+        )
+        # The COO plan is recorded as its own contribution rather than
+        # overwriting the Chair's synthesis; the brief keeps the Chair's
+        # action plan and the roadmap sits alongside it in the transcript.
+        return brief
+
     # -- entry point -------------------------------------------------------
 
     async def run(self) -> DecisionBriefOutput:
         """Execute the meeting. Raises MeetingAborted or MeetingCancelled."""
+        async with self._stack:
+            return await self._run()
+
+    async def _run(self) -> DecisionBriefOutput:
         self.meeting.status = MeetingStatus.RUNNING
         self.meeting.started_at = datetime.now(UTC)
         await self.db.flush()
@@ -814,6 +1317,20 @@ class MeetingOrchestrator:
         )
 
         try:
+            await self._load_subject()
+            # Retrieve what the organization already knows about this
+            # question. Relevant records only — the spec is explicit that a
+            # meeting should not carry the whole history.
+            self.knowledge_block = await build_meeting_context(
+                self.db, self.meeting.organization_id, self.meeting.question
+            )
+            if self.knowledge_block:
+                await self._emit(
+                    EventType.STAGE_CHANGED,
+                    stage=MeetingStage.INTAKE.value,
+                    knowledge_items=self.knowledge_block.count("[VERIFIED")
+                    + self.knowledge_block.count("[UNVERIFIED"),
+                )
             participants = await self._stage_agenda()
 
             await self._checkpoint()
@@ -834,18 +1351,25 @@ class MeetingOrchestrator:
             await self._checkpoint()
             brief = await self._stage_synthesis()
 
+            if self.profile.roadmap_stage:
+                await self._checkpoint()
+                brief = await self._stage_roadmap(brief)
+
         except MeetingCancelled:
+            await self._abandon_open_interventions()
             self.meeting.status = MeetingStatus.CANCELLED
             await self._finalise()
             await self._emit(EventType.MEETING_CANCELLED)
             raise
         except MeetingAborted as exc:
+            await self._abandon_open_interventions()
             self.meeting.status = MeetingStatus.FAILED
             self.meeting.failure_reason = str(exc)
             await self._finalise()
             await self._emit(EventType.MEETING_FAILED, code=exc.code, reason=str(exc))
             raise
 
+        await self._abandon_open_interventions()
         self.meeting.status = MeetingStatus.COMPLETED
         self.meeting.stage = MeetingStage.PERSISTED
         self.meeting.completed_at = datetime.now(UTC)

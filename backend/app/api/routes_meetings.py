@@ -11,7 +11,8 @@ from __future__ import annotations
 import asyncio
 import uuid
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, Header, HTTPException, Query, Response, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
@@ -19,10 +20,15 @@ from app.api.deps import CurrentOrg, CurrentUser, DbSession
 from app.models.decision import StrategicDecision
 from app.models.enums import MeetingStatus
 from app.models.meeting import Meeting, MeetingParticipant
+from app.orchestration.stream import meeting_event_stream
 from app.schemas.meeting import (
+    ActionItemDetail,
+    ActionItemUpdate,
     AssessmentRead,
     DecisionRead,
     DecisionUpdate,
+    InterventionCreate,
+    InterventionRead,
     MeetingCreate,
     MeetingDetail,
     MeetingEventRead,
@@ -31,6 +37,7 @@ from app.schemas.meeting import (
     ParticipantRead,
     RevisionRead,
 )
+from app.services import export
 from app.services import meeting as svc
 
 router = APIRouter(tags=["meetings"])
@@ -66,6 +73,9 @@ async def _detail(db: DbSession, meeting: Meeting) -> MeetingDetail:
         objections=[ObjectionRead.model_validate(o) for o in parts["objections"]],
         revisions=[RevisionRead.model_validate(r) for r in parts["revisions"]],
         decision=DecisionRead.model_validate(parts["decision"]) if parts["decision"] else None,
+        interventions=[
+            InterventionRead.model_validate(i) for i in parts["interventions"]
+        ],
     )
 
 
@@ -73,14 +83,19 @@ async def _detail(db: DbSession, meeting: Meeting) -> MeetingDetail:
 async def create_meeting(
     payload: MeetingCreate, org: CurrentOrg, user: CurrentUser, db: DbSession
 ) -> MeetingDetail:
-    meeting = await svc.create_meeting(
-        db,
-        organization_id=org.id,
-        user_id=user.id,
-        question=payload.question,
-        title=payload.title,
-        mode=payload.mode,
-    )
+    try:
+        meeting = await svc.create_meeting(
+            db,
+            organization_id=org.id,
+            user_id=user.id,
+            question=payload.question,
+            title=payload.title,
+            mode=payload.mode,
+            participant_agent_ids=payload.participant_agent_ids,
+            subject_decision_id=payload.subject_decision_id,
+        )
+    except svc.MeetingError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc))
 
     if payload.start_immediately:
         # Commit first: the background task opens its own session and must be
@@ -159,6 +174,46 @@ async def get_meeting_events(
     await _load_or_404(db, meeting_id, org.id)
     events = await svc.list_events(db, meeting_id, after_sequence=after, limit=limit)
     return [MeetingEventRead.model_validate(e) for e in events]
+
+
+@router.get("/meetings/{meeting_id}/stream")
+async def stream_meeting(
+    meeting_id: uuid.UUID,
+    org: CurrentOrg,
+    db: DbSession,
+    after: int = Query(default=0, ge=0),
+    last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
+) -> StreamingResponse:
+    """Live SSE feed for one meeting.
+
+    Authenticated like every other endpoint, which means the browser cannot
+    use `EventSource` (it cannot set an Authorization header). The frontend
+    reads this with `fetch` and parses the stream itself, which also keeps
+    the token out of the URL and therefore out of access logs.
+
+    Resume by passing `?after=N`, or let a reconnecting client send
+    `Last-Event-ID`; the header wins when both are present.
+    """
+    await _load_or_404(db, meeting_id, org.id)
+
+    cursor = after
+    if last_event_id:
+        try:
+            cursor = max(cursor, int(last_event_id))
+        except ValueError:
+            # A malformed resume header should not lose the stream; fall back
+            # to the query cursor rather than replaying from zero.
+            pass
+
+    return StreamingResponse(
+        meeting_event_stream(meeting_id, org.id, after_sequence=cursor),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
 
 
 @router.post("/meetings/{meeting_id}/cancel", response_model=MeetingRead)
@@ -243,3 +298,140 @@ async def _load_decision(
     if decision is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Decision not found")
     return decision
+
+
+@router.post(
+    "/meetings/{meeting_id}/interventions",
+    response_model=InterventionRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def create_intervention(
+    meeting_id: uuid.UUID,
+    payload: InterventionCreate,
+    org: CurrentOrg,
+    user: CurrentUser,
+    db: DbSession,
+) -> InterventionRead:
+    """Interrupt a live meeting to address one executive.
+
+    Queued, not executed here: the running meeting picks it up at its next
+    safe point, which is why this returns 202 rather than the answer. Polling
+    the meeting or the event stream surfaces the reply when it lands.
+    """
+    meeting = await _load_or_404(db, meeting_id, org.id)
+    try:
+        intervention = await svc.queue_intervention(
+            db,
+            meeting=meeting,
+            user_id=user.id,
+            agent_id=payload.agent_id,
+            kind=payload.kind,
+            prompt=payload.prompt,
+            about_agent_id=payload.about_agent_id,
+        )
+    except svc.MeetingError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc))
+    return InterventionRead.model_validate(intervention)
+
+
+@router.get(
+    "/meetings/{meeting_id}/interventions", response_model=list[InterventionRead]
+)
+async def list_interventions(
+    meeting_id: uuid.UUID, org: CurrentOrg, db: DbSession
+) -> list[InterventionRead]:
+    await _load_or_404(db, meeting_id, org.id)
+    rows = await svc.list_interventions(db, meeting_id)
+    return [InterventionRead.model_validate(i) for i in rows]
+
+
+@router.post("/meetings/{meeting_id}/pause", response_model=MeetingRead)
+async def pause_meeting(
+    meeting_id: uuid.UUID, org: CurrentOrg, db: DbSession
+) -> MeetingRead:
+    """Hold the meeting at its next safe point.
+
+    This does not abort a model request already in flight; the current step
+    finishes and the meeting stops before the next one.
+    """
+    meeting = await _load_or_404(db, meeting_id, org.id)
+    try:
+        await svc.pause_meeting(db, meeting)
+    except svc.MeetingError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc))
+    return MeetingRead.model_validate(meeting)
+
+
+@router.post("/meetings/{meeting_id}/resume", response_model=MeetingRead)
+async def resume_meeting(
+    meeting_id: uuid.UUID, org: CurrentOrg, db: DbSession
+) -> MeetingRead:
+    meeting = await _load_or_404(db, meeting_id, org.id)
+    try:
+        await svc.resume_meeting(db, meeting)
+    except svc.MeetingError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc))
+    return MeetingRead.model_validate(meeting)
+
+
+@router.get("/decisions/{decision_id}/export")
+async def export_decision(
+    decision_id: uuid.UUID,
+    org: CurrentOrg,
+    db: DbSession,
+    format: str = Query(default="markdown", pattern="^(markdown|pdf)$"),
+) -> Response:
+    """Download the brief as Markdown or PDF."""
+    decision = await _load_decision(db, decision_id, org.id)
+    question = None
+    if decision.meeting_id:
+        meeting = await db.get(Meeting, decision.meeting_id)
+        question = meeting.question if meeting else None
+
+    if format == "pdf":
+        return Response(
+            content=export.to_pdf(decision, question=question),
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="{export.filename_for(decision, "pdf")}"'
+                )
+            },
+        )
+
+    return Response(
+        content=export.to_markdown(decision, question=question),
+        media_type="text/markdown; charset=utf-8",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{export.filename_for(decision, "md")}"'
+            )
+        },
+    )
+
+
+@router.get("/action-items", response_model=list[ActionItemDetail])
+async def list_action_items(
+    org: CurrentOrg,
+    db: DbSession,
+    open_only: bool = Query(default=False),
+) -> list[ActionItemDetail]:
+    rows = await svc.list_action_items(db, org.id, open_only=open_only)
+    return [ActionItemDetail.model_validate(a) for a in rows]
+
+
+@router.patch("/action-items/{action_item_id}", response_model=ActionItemDetail)
+async def update_action_item(
+    action_item_id: uuid.UUID,
+    payload: ActionItemUpdate,
+    org: CurrentOrg,
+    db: DbSession,
+) -> ActionItemDetail:
+    """Assign, reschedule, or close an action item."""
+    item = await svc.get_action_item(db, action_item_id, org.id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Action item not found")
+    updated = await svc.update_action_item(
+        db, item, **payload.model_dump(exclude_unset=True)
+    )
+    return ActionItemDetail.model_validate(updated)

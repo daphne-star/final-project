@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Enum, Float, ForeignKey, Index, String, Text
+from sqlalchemy import Boolean, Computed, DateTime, Enum, Float, ForeignKey, Index, String, Text
 from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -55,4 +55,9 @@ class CompanyMemory(Base, UUIDMixin, TimestampMixin, SoftDeleteMixin):
         PGUUID(as_uuid=True), ForeignKey("documents.id", ondelete="SET NULL")
     )
     extra: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
-    search_vector: Mapped[str | None] = mapped_column(TSVECTOR)
+    #: Maintained by Postgres from key/value. Generated rather than
+    #: application-populated so no write path can leave it stale.
+    search_vector: Mapped[str | None] = mapped_column(
+        TSVECTOR,
+        Computed("to_tsvector('english', coalesce(key, '') || ' ' || coalesce(value, ''))", persisted=True),
+    )

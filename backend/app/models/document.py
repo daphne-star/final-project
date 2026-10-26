@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Enum, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import Computed, Enum, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -64,7 +64,12 @@ class DocumentChunk(Base, UUIDMixin, TimestampMixin):
     content: Mapped[str] = mapped_column(Text, nullable=False)
     token_estimate: Mapped[int | None] = mapped_column(Integer)
     chunk_metadata: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
-    search_vector: Mapped[str | None] = mapped_column(TSVECTOR)
+    #: Maintained by Postgres from content. Generated rather than
+    #: application-populated so no write path can leave it stale.
+    search_vector: Mapped[str | None] = mapped_column(
+        TSVECTOR,
+        Computed("to_tsvector('english', coalesce(content, ''))", persisted=True),
+    )
 
     document: Mapped[Document] = relationship(back_populates="chunks")
 

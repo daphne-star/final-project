@@ -15,6 +15,13 @@ export class ApiError extends Error {
 
 let authToken: string | null = localStorage.getItem('gb_token')
 
+/**
+ * Fired when the server rejects the token we hold. Access tokens expire while
+ * the tab is still open, and without this every subsequent request fails with
+ * a generic error and the user has no way back to the sign-in screen.
+ */
+export const UNAUTHORIZED_EVENT = 'ghostboard:unauthorized'
+
 export function setAuthToken(token: string | null) {
   authToken = token
   if (token) localStorage.setItem('gb_token', token)
@@ -35,6 +42,11 @@ export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise
   const res = await fetch(`${BASE}${path}`, { ...init, headers })
 
   if (!res.ok) {
+    if (res.status === 401 && authToken) {
+      setAuthToken(null)
+      window.dispatchEvent(new Event(UNAUTHORIZED_EVENT))
+    }
+
     // The backend returns { error: { code, message } } for every failure.
     let code = `http_${res.status}`
     let message = res.statusText

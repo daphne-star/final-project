@@ -10,6 +10,7 @@ from app.models.consultation import Consultation, ConsultationMessage
 from app.models.decision import ActionItem, DecisionPosition, StrategicDecision
 from app.models.document import Document, DocumentChunk, EvidenceSource
 from app.models.identity import CompanyProfile, Organization, OrganizationMember, User
+from app.models.intervention import MeetingIntervention
 from app.models.meeting import (
     AgentAssessment,
     AgentObjection,
@@ -40,6 +41,7 @@ __all__ = [
     "LLMUsageRecord",
     "Meeting",
     "MeetingEvent",
+    "MeetingIntervention",
     "MeetingParticipant",
     "Organization",
     "OrganizationMember",

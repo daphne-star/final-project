@@ -33,6 +33,10 @@ class Settings(BaseSettings):
 
     # --- Auth ---
     secret_key: str = Field(default="dev-only-insecure-change-me")
+    #: bcrypt work factor. Deliberately slow in production; the test suite
+    #: lowers it, since hashing a throwaway password 250 times is ~100s of
+    #: pure waste and proves nothing.
+    bcrypt_rounds: int = Field(default=12, ge=4, le=16)
     access_token_expire_minutes: int = 60 * 24 * 7
     jwt_algorithm: str = "HS256"
 
@@ -54,9 +58,17 @@ class Settings(BaseSettings):
     max_tool_calls_per_meeting: int = 40
     model_timeout_seconds: int = 120
     meeting_cost_limit_usd: float = 5.00
+    #: Always enforceable, unlike the cost limit: token counts are known
+    #: for every call whether or not a price is configured.
+    max_total_tokens_per_meeting: int = 400_000
+    #: JSON: {"model": {"input_per_million": x, "output_per_million": y}}.
+    #: Unset means costs are recorded as unknown rather than as zero.
+    model_prices: str | None = None
 
     # --- Uploads ---
     max_upload_bytes: int = 10 * 1024 * 1024
+    #: Outside the package tree, so an uploaded file can never be imported.
+    upload_dir: str = str(BACKEND_DIR / "var" / "uploads")
 
     @field_validator("cors_origins", mode="before")
     @classmethod

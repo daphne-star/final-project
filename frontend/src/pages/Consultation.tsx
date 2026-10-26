@@ -122,7 +122,7 @@ export function ConsultationPage() {
               executive ? `Ask ${executive.display_name}…` : 'Ask a question…'
             }
             aria-label="Your question"
-            className="max-h-40 min-h-10 flex-1 resize-y rounded-md border border-line bg-canvas px-3 py-2 text-sm text-ink placeholder:text-ink-faint focus:border-accent focus:outline-none"
+            className="max-h-40 min-h-10 flex-1 resize-y rounded-md border border-line bg-canvas px-3 py-2 text-sm text-ink placeholder:text-ink-faint focus:border-accent"
           />
           <Button type="submit" size="icon" disabled={!draft.trim() || send.isPending}>
             {send.isPending ? <Loader2 className="animate-spin" /> : <Send />}

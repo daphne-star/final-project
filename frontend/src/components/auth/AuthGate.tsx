@@ -1,7 +1,9 @@
-import { useState, type FormEvent } from 'react'
+import { useEffect, useState, type FormEvent } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import { Loader2 } from 'lucide-react'
 
 import { useLogin, useRegister } from '@/api/auth'
+import { UNAUTHORIZED_EVENT } from '@/api/client'
 import { useMe } from '@/api/consultations'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -14,6 +16,15 @@ import { cn } from '@/lib/utils'
  */
 export function AuthGate({ children }: { children: React.ReactNode }) {
   const { data: me, isLoading, isError } = useMe()
+  const qc = useQueryClient()
+
+  // Tokens expire mid-session. apiFetch drops the dead one and says so here,
+  // which drops the cached identity and brings the sign-in screen back.
+  useEffect(() => {
+    const onUnauthorized = () => qc.clear()
+    window.addEventListener(UNAUTHORIZED_EVENT, onUnauthorized)
+    return () => window.removeEventListener(UNAUTHORIZED_EVENT, onUnauthorized)
+  }, [qc])
 
   if (isLoading) {
     return (
@@ -48,7 +59,9 @@ function AuthScreen() {
     <div className="grid min-h-dvh place-items-center px-4">
       <Card className="w-full max-w-sm">
         <CardHeader>
-          <CardTitle className="font-display text-xl">Ghost Board</CardTitle>
+          <CardTitle as="h1" className="font-display text-xl">
+            Ghost Board
+          </CardTitle>
           <CardDescription>
             {mode === 'login'
               ? 'Sign in to reach your board.'
@@ -133,7 +146,7 @@ function Field({
         onChange={(e) => onChange(e.target.value)}
         className={cn(
           'w-full rounded-md border border-line bg-canvas px-3 py-2 text-sm text-ink',
-          'placeholder:text-ink-faint focus:border-accent focus:outline-none',
+          'placeholder:text-ink-faint focus:border-accent',
           className,
         )}
       />
